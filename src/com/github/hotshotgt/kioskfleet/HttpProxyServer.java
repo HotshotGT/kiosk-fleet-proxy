@@ -7,15 +7,12 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.UnsupportedEncodingException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
@@ -26,9 +23,8 @@ import java.util.regex.Pattern;
  *
  * <p>{@code /} redirects to this device's own id and {@code /<id>/...} goes to
  * that kiosk's admin server. Responses lose {@code X-Frame-Options} and gain a
- * {@code frame-ancestors} policy, which is the whole reason this exists:
- * dart:io answers {@code SAMEORIGIN}, no browser lets a dashboard iframe
- * override that, and a header the browser accepts is the only fix.
+ * {@code frame-ancestors} policy, which is the whole point: the app answers
+ * {@code SAMEORIGIN} and no browser lets a dashboard iframe override that.
  */
 final class HttpProxyServer {
 
@@ -102,9 +98,6 @@ final class HttpProxyServer {
             try {
                 socket = server.accept();
             } catch (IOException stop) {
-                if (running) {
-                    log.log("accept failed: " + stop.getMessage());
-                }
                 return;
             }
             try {
@@ -125,12 +118,10 @@ final class HttpProxyServer {
             InputStream in = new BufferedInputStream(socket.getInputStream(), BUFFER);
             OutputStream out = new BufferedOutputStream(socket.getOutputStream(), BUFFER);
             Request request = readRequest(in);
-            if (request == null) {
-                closeQuietly(socket);
-                return;
+            if (request != null) {
+                route(socket, in, out, request);
+                out.flush();
             }
-            route(socket, in, out, request);
-            out.flush();
         } catch (IOException gone) {
             // A browser that navigated away mid-response is not an error.
         } finally {
@@ -138,66 +129,52 @@ final class HttpProxyServer {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // routing
-
     private void route(Socket socket, InputStream in, OutputStream out, Request request) throws IOException {
         String path = request.path();
         if (path == null || !path.startsWith("/")) {
-            writeText(out, 400, "bad request");
+            text(out, 400, "bad request");
             return;
         }
+        String query = request.query();
         if ("/".equals(path)) {
             String self = registry.self();
             if (self.isEmpty()) {
-                waiting(out);
+                text(out, 503, "waiting for this kiosk to report its id");
                 return;
             }
-            String location = "/" + self + "/" + (request.query().isEmpty() ? "" : "?" + request.query());
             List<String[]> headers = new ArrayList<String[]>();
-            headers.add(new String[] {"Location", location});
+            headers.add(new String[] {"Location", "/" + self + "/" + (query.isEmpty() ? "" : "?" + query)});
             headers.add(new String[] {"Content-Length", "0"});
             writeHead(out, 302, "Found", headers);
             return;
         }
         Matcher matcher = ROUTE.matcher(path);
         if (!matcher.matches()) {
-            writeText(out, 404, "not found");
+            text(out, 404, "not found");
             return;
         }
         String id = matcher.group(1);
-        String rest = matcher.group(2) == null ? "/" : matcher.group(2);
+        String rest = (matcher.group(2) == null ? "/" : matcher.group(2)) + (query.isEmpty() ? "" : "?" + query);
         String target = registry.get(id);
         if (target == null) {
             log.log("no address known for " + id);
-            writeText(out, 502, "unknown kiosk");
+            text(out, 502, "unknown kiosk");
             return;
         }
         String origin = originOf(request);
-        if ("websocket".equalsIgnoreCase(request.header("Upgrade"))) {
-            String query = request.query();
-            new WebSocketRelay(target, origin, registry, local, log)
-                    .relay(socket, request, in, out, rest + (query.isEmpty() ? "" : "?" + query));
-            throw new IOException("websocket finished");
+        if ("websocket".equalsIgnoreCase(request.headers.first("Upgrade"))) {
+            new WebSocketRelay(target, origin, registry, local, log).relay(socket, request, in, out, rest);
+            return;
         }
-        proxy(request, in, id, rest + (request.query().isEmpty() ? "" : "?" + request.query()), target, origin, out);
+        proxy(request, in, id, rest, target, origin, out);
     }
 
     private static String originOf(Request request) {
-        String scheme = "http";
-        String forwarded = request.header("X-Forwarded-Proto");
-        if (forwarded != null && forwarded.equalsIgnoreCase("https")) {
-            scheme = "https";
-        }
-        String host = request.header("Host");
-        if (host == null || host.isEmpty()) {
-            host = "localhost";
-        }
-        return scheme + "://" + host;
+        String forwarded = request.headers.first("X-Forwarded-Proto");
+        String scheme = forwarded != null && forwarded.equalsIgnoreCase("https") ? "https" : "http";
+        String host = request.headers.first("Host");
+        return scheme + "://" + (host == null || host.isEmpty() ? "localhost" : host);
     }
-
-    // -----------------------------------------------------------------------
-    // proxying
 
     private void proxy(Request request, InputStream clientIn, String id, String path, String target, String origin,
                        OutputStream out) throws IOException {
@@ -207,52 +184,40 @@ final class HttpProxyServer {
             upstream.setSoTimeout(0);
         } catch (IOException unreachable) {
             log.log(request.method + " " + request.path() + " -> " + target + ": " + unreachable.getMessage());
-            writeText(out, 502, "kiosk unreachable");
+            text(out, 502, "kiosk unreachable");
             return;
         }
         try {
             InputStream upIn = new BufferedInputStream(upstream.getInputStream(), BUFFER);
             OutputStream upOut = new BufferedOutputStream(upstream.getOutputStream(), BUFFER);
             upOut.write(requestHead(request, path, target).getBytes("ISO-8859-1"));
-            upOut.flush();
-            // The admin API is all POST with a JSON body, so a dropped body turns
-            // every command into a 401 or an empty request.
-            String transferEncoding = request.header("Transfer-Encoding");
-            boolean chunkedRequest = transferEncoding != null
-                    && transferEncoding.toLowerCase(Locale.US).contains("chunked");
-            String lengthHeader = request.header("Content-Length");
-            if (chunkedRequest) {
+            // The admin API is all POST with a body, so dropping it turns every
+            // command into an empty request.
+            String transferEncoding = request.headers.first("Transfer-Encoding");
+            String lengthHeader = request.headers.first("Content-Length");
+            if (transferEncoding != null && transferEncoding.toLowerCase(Locale.US).contains("chunked")) {
                 copyChunked(clientIn, upOut);
-            } else if (lengthHeader != null) {
-                long length = -1;
-                try {
-                    length = Long.parseLong(lengthHeader.trim());
-                } catch (NumberFormatException bad) {
-                    length = -1;
-                }
-                if (length > 0) {
-                    copyExactly(clientIn, upOut, length);
-                }
+            } else if (lengthHeader != null && !"0".equals(lengthHeader.trim())) {
+                copyExactly(clientIn, upOut, Long.parseLong(lengthHeader.trim()));
             }
             upOut.flush();
 
             Response response = readResponse(upIn);
             if (response == null) {
-                writeText(out, 502, "kiosk sent no response");
+                text(out, 502, "kiosk sent no response");
                 return;
             }
-            String contentType = response.header("Content-Type");
+            String contentType = response.headers.first("Content-Type");
             boolean json = contentType != null
                     && contentType.toLowerCase(Locale.US).startsWith("application/json")
-                    && !response.hasHeader("Content-Encoding");
+                    && response.headers.first("Content-Encoding") == null;
 
             List<String[]> headers = new ArrayList<String[]>();
-            for (String[] header : response.headers) {
+            for (String[] header : response.headers.all()) {
                 String name = header[0].toLowerCase(Locale.US);
-                if (name.equals("x-frame-options") || name.equals("content-security-policy")) {
-                    continue;
-                }
-                if (name.equals("transfer-encoding") || name.equals("connection") || name.equals("content-length")) {
+                if (name.equals("x-frame-options") || name.equals("content-security-policy")
+                        || name.equals("transfer-encoding") || name.equals("connection")
+                        || name.equals("content-length")) {
                     continue;
                 }
                 String value = header[1];
@@ -265,32 +230,28 @@ final class HttpProxyServer {
 
             if (json) {
                 byte[] body = readBody(upIn, response);
-                String rewritten = FleetPayload.rewrite(new String(body, "UTF-8"), origin, registry, local);
-                byte[] bytes = rewritten.getBytes("UTF-8");
-                headers.add(new String[] {"Content-Length", String.valueOf(bytes.length)});
+                byte[] rewritten = FleetPayload.rewrite(new String(body, "UTF-8"), origin, registry, local)
+                        .getBytes("UTF-8");
+                headers.add(new String[] {"Content-Length", String.valueOf(rewritten.length)});
                 writeHead(out, response.status, response.reason, headers);
-                out.write(bytes);
-                out.flush();
+                out.write(rewritten);
                 return;
             }
             if (response.chunked) {
                 headers.add(new String[] {"Transfer-Encoding", "chunked"});
                 writeHead(out, response.status, response.reason, headers);
-                out.flush();
                 copyChunked(upIn, out);
                 return;
             }
             if (response.contentLength >= 0) {
                 headers.add(new String[] {"Content-Length", String.valueOf(response.contentLength)});
                 writeHead(out, response.status, response.reason, headers);
-                out.flush();
                 copyExactly(upIn, out, response.contentLength);
                 return;
             }
-            // No length and no chunking: a stream that ends when the socket does,
-            // which is what the camera feeds look like.
+            // No length and no chunking: a stream that ends with the socket, which
+            // is what the camera feeds look like.
             writeHead(out, response.status, response.reason, headers);
-            out.flush();
             copyUntilEnd(upIn, out);
         } finally {
             closeQuietly(upstream);
@@ -298,36 +259,26 @@ final class HttpProxyServer {
     }
 
     private String frameAncestors() {
-        if (ancestor.isEmpty()) {
-            return "frame-ancestors 'self'";
-        }
-        return "frame-ancestors 'self' " + ancestor;
+        return ancestor.isEmpty() ? "frame-ancestors 'self'" : "frame-ancestors 'self' " + ancestor;
     }
 
     private static String requestHead(Request request, String path, String target) {
         StringBuilder head = new StringBuilder(256);
-        head.append(request.method).append(' ').append(path.startsWith("/") ? path : "/" + path).append(" HTTP/1.1\r\n");
+        head.append(request.method).append(' ').append(path.startsWith("/") ? path : "/" + path)
+                .append(" HTTP/1.1\r\n");
         head.append("Host: ").append(target).append("\r\n");
-        for (Map.Entry<String, List<String>> entry : request.headers.entrySet()) {
-            String name = entry.getKey();
-            if (hopByHop(name) || name.equals("host") || name.equals("accept-encoding")) {
+        for (String[] header : request.headers.all()) {
+            String name = header[0].toLowerCase(Locale.US);
+            if (name.equals("host") || name.equals("connection") || name.equals("keep-alive")
+                    || name.equals("proxy-connection") || name.equals("te") || name.equals("trailer")
+                    || name.equals("upgrade") || name.equals("accept-encoding")
+                    || name.startsWith("sec-websocket-")) {
                 continue;
             }
-            for (String value : entry.getValue()) {
-                head.append(entry.getKey()).append(": ").append(value).append("\r\n");
-            }
+            head.append(header[0]).append(": ").append(header[1]).append("\r\n");
         }
-        head.append("Accept-Encoding: identity\r\n");
-        head.append("Connection: close\r\n");
-        head.append("\r\n");
+        head.append("Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
         return head.toString();
-    }
-
-    private static boolean hopByHop(String lowerName) {
-        return lowerName.equals("connection") || lowerName.equals("keep-alive") || lowerName.equals("proxy-connection")
-                || lowerName.equals("te") || lowerName.equals("trailer")
-                || lowerName.equals("upgrade") || lowerName.equals("sec-websocket-key")
-                || lowerName.equals("sec-websocket-version") || lowerName.equals("sec-websocket-extensions");
     }
 
     private static InetSocketAddress address(String hostAndPort) {
@@ -335,24 +286,38 @@ final class HttpProxyServer {
         if (colon <= 0) {
             return new InetSocketAddress(hostAndPort, 80);
         }
-        String host = hostAndPort.substring(0, colon);
-        int port = Integer.parseInt(hostAndPort.substring(colon + 1));
-        return new InetSocketAddress(host, port);
+        return new InetSocketAddress(hostAndPort.substring(0, colon),
+                Integer.parseInt(hostAndPort.substring(colon + 1)));
     }
 
     // -----------------------------------------------------------------------
-    // HTTP reading and writing
+    // HTTP
+
+    static final class Headers {
+        private final List<String[]> entries = new ArrayList<String[]>();
+
+        void add(String name, String value) {
+            entries.add(new String[] {name, value});
+        }
+
+        List<String[]> all() {
+            return entries;
+        }
+
+        String first(String name) {
+            for (String[] entry : entries) {
+                if (entry[0].equalsIgnoreCase(name)) {
+                    return entry[1];
+                }
+            }
+            return null;
+        }
+    }
 
     static final class Request {
         String method;
         String target;
-        String version;
-        final Map<String, List<String>> headers = new LinkedHashMap<String, List<String>>();
-
-        String header(String name) {
-            List<String> values = headers.get(name.toLowerCase(Locale.US));
-            return values == null || values.isEmpty() ? null : values.get(0);
-        }
+        final Headers headers = new Headers();
 
         String path() {
             if (target == null) {
@@ -371,22 +336,9 @@ final class HttpProxyServer {
     static final class Response {
         int status;
         String reason = "";
-        final List<String[]> headers = new ArrayList<String[]>();
+        final Headers headers = new Headers();
         boolean chunked;
         long contentLength = -1;
-
-        String header(String name) {
-            for (String[] header : headers) {
-                if (header[0].equalsIgnoreCase(name)) {
-                    return header[1];
-                }
-            }
-            return null;
-        }
-
-        boolean hasHeader(String name) {
-            return header(name) != null;
-        }
     }
 
     static Request readRequest(InputStream in) throws IOException {
@@ -401,7 +353,6 @@ final class HttpProxyServer {
         Request request = new Request();
         request.method = parts[0];
         request.target = parts[1];
-        request.version = parts[2];
         readHeaders(in, request.headers);
         return request;
     }
@@ -419,9 +370,9 @@ final class HttpProxyServer {
         response.status = Integer.parseInt(parts[1]);
         response.reason = parts.length > 2 ? parts[2] : "";
         readHeaders(in, response.headers);
-        String transferEncoding = response.header("Transfer-Encoding");
+        String transferEncoding = response.headers.first("Transfer-Encoding");
         response.chunked = transferEncoding != null && transferEncoding.toLowerCase(Locale.US).contains("chunked");
-        String length = response.header("Content-Length");
+        String length = response.headers.first("Content-Length");
         if (length != null) {
             try {
                 response.contentLength = Long.parseLong(length.trim());
@@ -432,54 +383,16 @@ final class HttpProxyServer {
         return response;
     }
 
-    private static void readHeaders(InputStream in, List<String[]> headers) throws IOException {
-        readHeaders(in, headers, null);
-        // Headers land in one of two shapes; this keeps a single parser.
-    }
-
-    private static void readHeaders(InputStream in, List<String[]> list, Map<String, List<String>> map) throws IOException {
+    private static void readHeaders(InputStream in, Headers headers) throws IOException {
         for (int i = 0; i < MAX_HEADERS; i++) {
             String line = readLine(in);
             if (line == null || line.isEmpty()) {
                 return;
             }
             int colon = line.indexOf(':');
-            if (colon <= 0) {
-                continue;
+            if (colon > 0) {
+                headers.add(line.substring(0, colon).trim(), line.substring(colon + 1).trim());
             }
-            String name = line.substring(0, colon).trim();
-            String value = line.substring(colon + 1).trim();
-            list.add(new String[] {name, value});
-            if (map != null) {
-                String key = name.toLowerCase(Locale.US);
-                List<String> values = map.get(key);
-                if (values == null) {
-                    values = new ArrayList<String>();
-                    map.put(key, values);
-                }
-                values.add(value);
-            }
-        }
-    }
-
-    private static void readHeaders(InputStream in, Map<String, List<String>> map) throws IOException {
-        for (int i = 0; i < MAX_HEADERS; i++) {
-            String line = readLine(in);
-            if (line == null || line.isEmpty()) {
-                return;
-            }
-            int colon = line.indexOf(':');
-            if (colon <= 0) {
-                continue;
-            }
-            String key = line.substring(0, colon).trim().toLowerCase(Locale.US);
-            String value = line.substring(colon + 1).trim();
-            List<String> values = map.get(key);
-            if (values == null) {
-                values = new ArrayList<String>();
-                map.put(key, values);
-            }
-            values.add(value);
         }
     }
 
@@ -501,38 +414,36 @@ final class HttpProxyServer {
     }
 
     private static byte[] readBody(InputStream in, Response response) throws IOException {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
         if (response.chunked) {
-            ByteArrayOutputStream body = new ByteArrayOutputStream();
             while (true) {
-                String sizeLine = readLine(in);
-                if (sizeLine == null) {
-                    break;
-                }
-                int semicolon = sizeLine.indexOf(';');
-                String hex = (semicolon < 0 ? sizeLine : sizeLine.substring(0, semicolon)).trim();
-                int size;
-                try {
-                    size = Integer.parseInt(hex, 16);
-                } catch (NumberFormatException bad) {
-                    break;
-                }
-                if (size == 0) {
+                int size = chunkSize(in);
+                if (size <= 0) {
                     readLine(in);
                     break;
                 }
                 copyExactly(in, body, size);
                 readLine(in);
             }
-            return body.toByteArray();
-        }
-        if (response.contentLength >= 0) {
-            ByteArrayOutputStream body = new ByteArrayOutputStream((int) Math.min(response.contentLength, 1 << 20));
+        } else if (response.contentLength >= 0) {
             copyExactly(in, body, response.contentLength);
-            return body.toByteArray();
+        } else {
+            copyUntilEnd(in, body);
         }
-        ByteArrayOutputStream body = new ByteArrayOutputStream();
-        copyUntilEnd(in, body);
         return body.toByteArray();
+    }
+
+    private static int chunkSize(InputStream in) throws IOException {
+        String line = readLine(in);
+        if (line == null) {
+            return 0;
+        }
+        int semicolon = line.indexOf(';');
+        try {
+            return Integer.parseInt((semicolon < 0 ? line : line.substring(0, semicolon)).trim(), 16);
+        } catch (NumberFormatException bad) {
+            return 0;
+        }
     }
 
     private static void copyExactly(InputStream in, OutputStream out, long count) throws IOException {
@@ -544,32 +455,21 @@ final class HttpProxyServer {
                 return;
             }
             out.write(buffer, 0, read);
-            left -= read;
             out.flush();
+            left -= read;
         }
     }
 
     private static void copyChunked(InputStream in, OutputStream out) throws IOException {
         while (true) {
-            String sizeLine = readLine(in);
-            if (sizeLine == null) {
-                return;
-            }
-            int semicolon = sizeLine.indexOf(';');
-            String hex = (semicolon < 0 ? sizeLine : sizeLine.substring(0, semicolon)).trim();
-            int size;
-            try {
-                size = Integer.parseInt(hex, 16);
-            } catch (NumberFormatException bad) {
-                return;
-            }
-            if (size == 0) {
+            int size = chunkSize(in);
+            if (size <= 0) {
                 out.write("0\r\n\r\n".getBytes("ISO-8859-1"));
                 out.flush();
                 readLine(in);
                 return;
             }
-            out.write((hex + "\r\n").getBytes("ISO-8859-1"));
+            out.write((Integer.toHexString(size) + "\r\n").getBytes("ISO-8859-1"));
             copyExactly(in, out, size);
             out.write("\r\n".getBytes("ISO-8859-1"));
             out.flush();
@@ -580,12 +480,7 @@ final class HttpProxyServer {
     private static void copyUntilEnd(InputStream in, OutputStream out) throws IOException {
         byte[] buffer = new byte[BUFFER];
         while (true) {
-            int read;
-            try {
-                read = in.read(buffer);
-            } catch (IOException closed) {
-                return;
-            }
+            int read = in.read(buffer);
             if (read < 0) {
                 return;
             }
@@ -596,8 +491,7 @@ final class HttpProxyServer {
 
     static void writeHead(OutputStream out, int status, String reason, List<String[]> headers) throws IOException {
         StringBuilder head = new StringBuilder(256);
-        head.append("HTTP/1.1 ").append(status).append(' ').append(reason == null || reason.isEmpty() ? "" : reason)
-                .append("\r\n");
+        head.append("HTTP/1.1 ").append(status).append(' ').append(reason == null ? "" : reason).append("\r\n");
         for (String[] header : headers) {
             head.append(header[0]).append(": ").append(header[1]).append("\r\n");
         }
@@ -606,26 +500,12 @@ final class HttpProxyServer {
         out.flush();
     }
 
-    private void writeText(OutputStream out, int status, String body) throws IOException {
+    private static void text(OutputStream out, int status, String body) throws IOException {
         byte[] bytes = body.getBytes("UTF-8");
         List<String[]> headers = new ArrayList<String[]>();
         headers.add(new String[] {"Content-Type", "text/plain; charset=utf-8"});
         headers.add(new String[] {"Content-Length", String.valueOf(bytes.length)});
         writeHead(out, status, status == 200 ? "OK" : String.valueOf(status), headers);
-        out.write(bytes);
-        out.flush();
-    }
-
-    private void waiting(OutputStream out) throws IOException {
-        String page = "<!doctype html><meta http-equiv=\"refresh\" content=\"2\">"
-                + "<title>Kiosk Fleet Proxy</title><p>Waiting for this kiosk to report its id.</p>";
-        byte[] bytes = page.getBytes("UTF-8");
-        List<String[]> headers = new ArrayList<String[]>();
-        headers.add(new String[] {"Content-Type", "text/html; charset=utf-8"});
-        headers.add(new String[] {"Content-Length", String.valueOf(bytes.length)});
-        headers.add(new String[] {"Retry-After", "2"});
-        headers.add(new String[] {"Cache-Control", "no-store"});
-        writeHead(out, 503, "Service Unavailable", headers);
         out.write(bytes);
         out.flush();
     }
@@ -638,14 +518,6 @@ final class HttpProxyServer {
             socket.close();
         } catch (IOException ignored) {
             // Already closed.
-        }
-    }
-
-    static byte[] latin1(String text) {
-        try {
-            return text.getBytes("ISO-8859-1");
-        } catch (UnsupportedEncodingException impossible) {
-            return text.getBytes();
         }
     }
 }

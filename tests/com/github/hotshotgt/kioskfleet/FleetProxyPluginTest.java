@@ -157,7 +157,7 @@ public final class FleetProxyPluginTest {
                 try {
                     Socket socket = upstream.accept();
                     HttpProxyServer.Request request = HttpProxyServer.readRequest(socket.getInputStream());
-                    int length = Integer.parseInt(request.header("Content-Length").trim());
+                    int length = Integer.parseInt(request.headers.first("Content-Length").trim());
                     byte[] payload = new byte[length];
                     int offset = 0;
                     while (offset < length) {

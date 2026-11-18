@@ -50,7 +50,7 @@ the admin password.
 
 ```sh
 export KS_ADMIN_PASSWORD=...
-./tools/install.py --host http://<kiosk>:2324 --zip dist/ks-kiosk-fleet-proxy-0.2.3.zip
+./tools/install.py --host http://<kiosk>:2324 --zip dist/ks-kiosk-fleet-proxy-0.3.0.zip
 ```
 
 A ZIP works from anywhere, including a Forgejo pipeline, because the app's
@@ -74,15 +74,14 @@ install per fleet is enough.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `port` | `8790` | Port the proxy listens on, as a typed field. |
 | `frameAncestors` | empty | Space separated origins allowed to frame the page, for example `https://dashboard.example`. Empty means only this origin may frame it. |
 
-Changing either one restarts the listener. The `restart` command does the same
-without touching settings.
+The port is fixed at 8790. Changing the setting restarts the listener.
 
 ## Deploying
 
-Point a reverse proxy at the leader's port and keep one hostname for the fleet:
+Point a reverse proxy at port 8790 on the leader and keep one hostname for the
+fleet:
 
 ```
 kiosk.example  ->  http://<leader address>:8790
@@ -97,7 +96,7 @@ A JDK and an Android SDK with build-tools are enough, and no device is needed.
 
 ```sh
 python3 tools/test.py
-python3 tools/build.py --android-platform 36.1 --version 0.2.3
+python3 tools/build.py --android-platform 36.1 --version 0.3.0
 ```
 
 `tools/test.py` covers the roster rewrite, the route pattern, RFC 6455 vectors, the
@@ -119,8 +118,9 @@ release, so leave `prerelease` off.
   links come back as `https`.
 - Camera streams and other endless responses are passed through unbuffered; only
   `application/json` bodies are buffered for rewriting.
-- A number setting is validated by the app. Min, max and step have to be in range,
-  and a slider stops at 10000 steps, which is why the port is a typed field.
+- There is no mDNS discovery. The fleet list from the app's settings seeds the
+  registry, and the roster seen through the proxy keeps it current; a fleet whose
+  settings list is empty starts answering 502 for ids until a page passes through.
 
 ## Layout
 

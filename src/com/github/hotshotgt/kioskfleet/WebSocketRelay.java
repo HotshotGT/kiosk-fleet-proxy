@@ -8,41 +8,33 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Random;
 
 /**
- * Relays one WebSocket connection to a kiosk, rewriting the text messages that
- * carry the fleet roster.
+ * Relays one WebSocket to a kiosk, rewriting the text messages that carry the
+ * fleet roster.
  *
- * <p>The roster arrives twice: once in an HTTP response and again over this
- * socket. The socket copy wins in the app, so rewriting only the HTTP body sends
- * the browser straight back to a raw address. This is why the relay exists.
+ * <p>The roster arrives twice, in an HTTP response and again over this socket,
+ * and the socket copy is the one the app uses. Without the relay a switched
+ * kiosk sends the browser back to a raw address.
  *
- * <p>Compression is refused on the way up. If the kiosk agreed to
- * permessage-deflate, message payloads would be binary and could not be
- * rewritten, so the upgrade request leaves that extension out.
+ * <p>Compression is refused on the way up: a permessage-deflate payload is
+ * binary and could not be rewritten.
  */
 final class WebSocketRelay {
 
     private static final String GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    private static final int OP_CONTINUATION = 0x0;
     private static final int OP_TEXT = 0x1;
-    private static final int OP_BINARY = 0x2;
     private static final int OP_CLOSE = 0x8;
-    private static final int OP_PING = 0x9;
-    private static final int OP_PONG = 0xA;
 
     private final String target;
     private final String origin;
     private final Registry registry;
     private final LocalAddresses local;
     private final HttpProxyServer.Logger log;
-    private final Random random = new Random();
 
     WebSocketRelay(String target, String origin, Registry registry, LocalAddresses local, HttpProxyServer.Logger log) {
         this.target = target;
@@ -54,7 +46,7 @@ final class WebSocketRelay {
 
     void relay(Socket clientSocket, HttpProxyServer.Request request, InputStream clientIn, OutputStream clientOut,
                String pathAndQuery) throws IOException {
-        String key = request.header("Sec-WebSocket-Key");
+        String key = request.headers.first("Sec-WebSocket-Key");
         if (key == null || key.isEmpty()) {
             return;
         }
@@ -64,7 +56,7 @@ final class WebSocketRelay {
             upstream.setSoTimeout(0);
         } catch (IOException unreachable) {
             log.log("websocket to " + target + ": " + unreachable.getMessage());
-            HttpProxyServer.writeHead(clientOut, 502, "Bad Gateway", headers("Content-Length", "0"));
+            refuse(clientOut);
             return;
         }
         InputStream upIn = upstream.getInputStream();
@@ -74,55 +66,41 @@ final class WebSocketRelay {
             upOut.flush();
             HttpProxyServer.Response response = HttpProxyServer.readResponse(upIn);
             if (response == null || response.status != 101) {
-                int status = response == null ? 502 : response.status;
-                log.log("websocket upgrade refused: " + status);
-                HttpProxyServer.writeHead(clientOut, 502, "Bad Gateway", headers("Content-Length", "0"));
+                log.log("websocket upgrade refused: " + (response == null ? "no response" : response.status));
+                refuse(clientOut);
                 return;
             }
-            List<String[]> accept = new ArrayList<String[]>();
-            accept.add(new String[] {"Upgrade", "websocket"});
-            accept.add(new String[] {"Connection", "Upgrade"});
-            accept.add(new String[] {"Sec-WebSocket-Accept", acceptKey(key)});
-            StringBuilder head = new StringBuilder(160);
-            head.append("HTTP/1.1 101 Switching Protocols\r\n");
-            for (String[] header : accept) {
-                head.append(header[0]).append(": ").append(header[1]).append("\r\n");
-            }
-            head.append("\r\n");
-            clientOut.write(head.toString().getBytes("ISO-8859-1"));
+            clientOut.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                    + "Connection: Upgrade\r\nSec-WebSocket-Accept: " + acceptKey(key) + "\r\n\r\n")
+                    .getBytes("ISO-8859-1"));
             clientOut.flush();
-
-            Thread upstreamToClient = new Thread(new Runnable() {
+            Thread down = new Thread(new Runnable() {
                 @Override
                 public void run() {
                     pump(upIn, clientOut, false);
                 }
             }, "kiosk-fleet-proxy-ws-down");
-            Thread clientToUpstream = new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    pump(clientIn, upOut, true);
-                }
-            }, "kiosk-fleet-proxy-ws-up");
-            upstreamToClient.setDaemon(true);
-            clientToUpstream.setDaemon(true);
-            upstreamToClient.start();
-            clientToUpstream.start();
-            try {
-                upstreamToClient.join();
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
+            down.setDaemon(true);
+            down.start();
+            pump(clientIn, upOut, true);
+            down.join();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
         } finally {
             HttpProxyServer.closeQuietly(upstream);
             HttpProxyServer.closeQuietly(clientSocket);
         }
     }
 
-    /** Reads frames until the socket ends, rewriting text messages on the way through. */
-    private void pump(InputStream in, OutputStream out, boolean maskForServer) {
+    private static void refuse(OutputStream out) throws IOException {
+        List<String[]> headers = new ArrayList<String[]>();
+        headers.add(new String[] {"Content-Length", "0"});
+        HttpProxyServer.writeHead(out, 502, "Bad Gateway", headers);
+    }
+
+    /** Reads frames until the socket ends, rewriting text messages on the way. */
+    private void pump(InputStream in, OutputStream out, boolean masked) {
         ByteArrayOutputStream pending = null;
-        int pendingOpcode = OP_CONTINUATION;
         try {
             while (true) {
                 Frame frame = readFrame(in);
@@ -130,57 +108,41 @@ final class WebSocketRelay {
                     return;
                 }
                 if (frame.opcode >= OP_CLOSE) {
-                    writeFrame(out, frame.fin, frame.opcode, frame.payload, maskForServer);
+                    writeFrame(out, frame.fin, frame.opcode, frame.payload, masked);
                     if (frame.opcode == OP_CLOSE) {
                         return;
                     }
                     continue;
                 }
-                if (frame.opcode == OP_CONTINUATION && pending != null) {
+                if (frame.opcode == 0x0 && pending != null) {
                     pending.write(frame.payload);
-                    if (!frame.fin) {
-                        continue;
+                    if (frame.fin) {
+                        writeFrame(out, true, OP_TEXT, rewrite(pending.toByteArray()), masked);
+                        pending = null;
                     }
-                    byte[] message = pending.toByteArray();
-                    pending = null;
-                    int opcode = pendingOpcode;
-                    pendingOpcode = OP_CONTINUATION;
-                    writeFrame(out, true, opcode, maybeRewrite(opcode, message), maskForServer);
                     continue;
                 }
                 if (frame.opcode == OP_TEXT && !frame.fin) {
                     pending = new ByteArrayOutputStream();
                     pending.write(frame.payload);
-                    pendingOpcode = OP_TEXT;
                     continue;
                 }
-                if (frame.opcode == OP_TEXT || frame.opcode == OP_BINARY) {
-                    writeFrame(out, frame.fin, frame.opcode, maybeRewrite(frame.opcode, frame.payload), maskForServer);
-                    continue;
-                }
-                writeFrame(out, frame.fin, frame.opcode, frame.payload, maskForServer);
+                writeFrame(out, frame.fin, frame.opcode,
+                        frame.opcode == OP_TEXT ? rewrite(frame.payload) : frame.payload, masked);
             }
         } catch (IOException gone) {
             // Either side closing is the normal end of a socket.
         }
     }
 
-    private byte[] maybeRewrite(int opcode, byte[] payload) {
-        if (opcode != OP_TEXT || payload.length == 0) {
-            return payload;
-        }
-        String text;
-        try {
-            text = new String(payload, "UTF-8");
-        } catch (IOException never) {
-            return payload;
-        }
-        String rewritten = FleetPayload.rewrite(text, origin, registry, local);
-        if (rewritten == text) {
+    private byte[] rewrite(byte[] payload) {
+        if (payload.length == 0) {
             return payload;
         }
         try {
-            return rewritten.getBytes("UTF-8");
+            String text = new String(payload, "UTF-8");
+            String rewritten = FleetPayload.rewrite(text, origin, registry, local);
+            return rewritten == text ? payload : rewritten.getBytes("UTF-8");
         } catch (IOException never) {
             return payload;
         }
@@ -189,32 +151,18 @@ final class WebSocketRelay {
     private String handshake(HttpProxyServer.Request request, String pathAndQuery, String key) {
         StringBuilder head = new StringBuilder(256);
         head.append("GET ").append(pathAndQuery.startsWith("/") ? pathAndQuery : "/" + pathAndQuery)
-                .append(" HTTP/1.1\r\n");
-        head.append("Host: ").append(target).append("\r\n");
-        head.append("Upgrade: websocket\r\n");
-        head.append("Connection: Upgrade\r\n");
-        head.append("Sec-WebSocket-Key: ").append(key).append("\r\n");
-        head.append("Sec-WebSocket-Version: 13\r\n");
-        for (Map.Entry<String, List<String>> entry : request.headers.entrySet()) {
-            String name = entry.getKey().toLowerCase(Locale.US);
-            if (name.equals("host") || name.equals("upgrade") || name.equals("connection")
-                    || name.equals("sec-websocket-key") || name.equals("sec-websocket-version")
-                    || name.equals("sec-websocket-extensions") || name.equals("accept-encoding")
-                    || name.equals("origin")) {
+                .append(" HTTP/1.1\r\nHost: ").append(target).append("\r\n")
+                .append("Upgrade: websocket\r\nConnection: Upgrade\r\n")
+                .append("Sec-WebSocket-Key: ").append(key).append("\r\nSec-WebSocket-Version: 13\r\n");
+        for (String[] header : request.headers.all()) {
+            String name = header[0].toLowerCase(Locale.US);
+            if (name.equals("host") || name.equals("connection") || name.equals("upgrade")
+                    || name.equals("accept-encoding") || name.equals("origin") || name.startsWith("sec-websocket-")) {
                 continue;
             }
-            for (String value : entry.getValue()) {
-                head.append(entry.getKey()).append(": ").append(value).append("\r\n");
-            }
+            head.append(header[0]).append(": ").append(header[1]).append("\r\n");
         }
-        head.append("\r\n");
-        return head.toString();
-    }
-
-    private static List<String[]> headers(String name, String value) {
-        List<String[]> headers = new ArrayList<String[]>();
-        headers.add(new String[] {name, value});
-        return headers;
+        return head.append("\r\n").toString();
     }
 
     private static InetSocketAddress address(String hostAndPort) {
@@ -229,12 +177,8 @@ final class WebSocketRelay {
     /** RFC 6455: base64(sha1(key + GUID)). */
     static String acceptKey(String key) {
         try {
-            MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
-            byte[] digest = sha1.digest((key + GUID).getBytes("ISO-8859-1"));
-            return base64(digest);
-        } catch (NoSuchAlgorithmException impossible) {
-            throw new IllegalStateException(impossible);
-        } catch (IOException impossible) {
+            return base64(MessageDigest.getInstance("SHA-1").digest((key + GUID).getBytes("ISO-8859-1")));
+        } catch (Exception impossible) {
             throw new IllegalStateException(impossible);
         }
     }
@@ -305,10 +249,7 @@ final class WebSocketRelay {
         if (masked) {
             byte[] mask = new byte[4];
             new Random().nextBytes(mask);
-            frame.write(mask[0]);
-            frame.write(mask[1]);
-            frame.write(mask[2]);
-            frame.write(mask[3]);
+            frame.write(mask, 0, 4);
             for (int i = 0; i < payload.length; i++) {
                 frame.write(payload[i] ^ mask[i & 3]);
             }
@@ -338,7 +279,7 @@ final class WebSocketRelay {
         }
     }
 
-    /** Base64, so no Android-only or API 26+ helper is needed. */
+    /** Base64 by hand: java.util.Base64 needs API 26 and android.util is a stub off-device. */
     static String base64(byte[] data) {
         final char[] alphabet =
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".toCharArray();
