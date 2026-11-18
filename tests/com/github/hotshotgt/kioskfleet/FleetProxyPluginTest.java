@@ -34,6 +34,7 @@ public final class FleetProxyPluginTest {
         staticAssetsServedFromCache();
         cacheKeepsEncodingVariantsApart();
         htmlGetsOriginStaticPathsAndPrefetch();
+        gzippedHtmlMatchesItsHeader();
         staticPathsServeWithoutAKioskId();
         compressedJsonPassesThrough();
         postBodyReachesUpstream();
@@ -471,6 +472,42 @@ public final class FleetProxyPluginTest {
             check("private, max-age=5".equals(response.header("cache-control")),
                     "a few seconds of cache instead of no-store: " + response.header("cache-control"));
             check(response.header("content-security-policy") != null, "frame ancestors still added");
+        } finally {
+            server.stop();
+            upstream.close();
+        }
+    }
+
+
+    /** A page that goes in gzipped must come out gzipped, and actually be gzipped. */
+    private static void gzippedHtmlMatchesItsHeader() throws Exception {
+        String html = "<html><head></head><body><script src=\"static/main.js?v=abc123\"></script></body></html>";
+        byte[] compressed = gzip(html);
+        ServerSocket upstream = serveOnce("HTTP/1.1 200 OK" + EOL + "Content-Type: text/html; charset=utf-8" + EOL
+                + "Content-Encoding: gzip" + EOL + "Cache-Control: no-store" + EOL
+                + "Content-Length: " + compressed.length + EOL + EOL, compressed);
+
+        Registry registry = new Registry();
+        registry.set("aaaaaaaaaaaa1111", "127.0.0.1:" + upstream.getLocalPort());
+        registry.set("bbbbbbbbbbbb2222", "127.0.0.1:9");
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            Response response = get(server.port(), "/aaaaaaaaaaaa1111/", "Accept-Encoding: gzip" + EOL);
+            check(response.status == 200, "status: " + response.status);
+            check("gzip".equals(response.header("content-encoding")), "still gzipped: "
+                    + response.header("content-encoding"));
+            java.io.InputStream in = new java.util.zip.GZIPInputStream(
+                    new ByteArrayInputStream(response.bytes));
+            ByteArrayOutputStream plain = new ByteArrayOutputStream();
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = in.read(buffer)) > 0) {
+                plain.write(buffer, 0, read);
+            }
+            String page = plain.toString("UTF-8");
+            check(page.contains("/static/main.js?v=abc123"), "the header and the body agree: " + page);
+            check(page.contains("rel=\"prefetch\""), "prefetch survived recompression: " + page);
         } finally {
             server.stop();
             upstream.close();

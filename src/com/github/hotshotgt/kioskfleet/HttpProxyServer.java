@@ -303,7 +303,7 @@ final class HttpProxyServer {
             if (name.equals("x-frame-options") || name.equals("content-security-policy")
                     || name.equals("transfer-encoding") || name.equals("connection")
                     || name.equals("content-length") || name.equals("keep-alive")
-                    || (html && name.equals("cache-control"))
+                    || (html && (name.equals("cache-control") || name.equals("content-encoding")))
                     || (json && name.equals("content-encoding"))) {
                 continue;
             }
@@ -330,6 +330,11 @@ final class HttpProxyServer {
                 byte[] body = readBody(upstream.in, response);
                 String page = new String(gzipped ? gunzip(body) : body, "UTF-8");
                 byte[] rewritten = HtmlRewriter.rewrite(page, id, registry).getBytes("UTF-8");
+                if (gzipped) {
+                    // Same encoding out as in, so the page still crosses the wifi small.
+                    rewritten = gzip(rewritten);
+                    headers.add(new String[] {"Content-Encoding", contentEncoding});
+                }
                 // The app sends no-store. A few seconds lets the prefetched copies
                 // of the other kiosks survive until the click, and the page still
                 // names its assets by build hash.
@@ -807,6 +812,14 @@ final class HttpProxyServer {
             out.write(buffer, 0, read);
             out.flush();
         }
+    }
+
+    private static byte[] gzip(byte[] plain) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream(Math.max(plain.length / 3, 1024));
+        java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(buffer);
+        gzip.write(plain);
+        gzip.close();
+        return buffer.toByteArray();
     }
 
     /** A gzipped body, decoded so the roster inside can be rewritten. */
