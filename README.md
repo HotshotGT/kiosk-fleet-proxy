@@ -34,6 +34,13 @@ This plugin puts one listener in front of the fleet. Every kiosk is reachable at
   of the upgrade so text frames stay readable and rewritable.
 - Request bodies are forwarded, which the admin API needs for every command and
   for login.
+- Connections stay open in both directions. A dashboard is around ninety
+  requests, and without keep-alive that is ninety handshakes to Traefik and
+  ninety more to the kiosk.
+- The app's static files are held in memory under their `?v=<hash>`, up to 24 MB,
+  because that hash is a content hash. Opening a kiosk you have never visited
+  serves its assets from this device instead of pulling a megabyte and a half over
+  the network. The cache empties when the listener restarts.
 
 ## Install
 
@@ -116,8 +123,11 @@ release, so leave `prerelease` off.
 - The `Host` header decides the origin written into rewritten links. Behind a TLS
   reverse proxy, forward the original `Host` and `X-Forwarded-Proto: https` so
   links come back as `https`.
-- Camera streams and other endless responses are passed through unbuffered; only
-  `application/json` bodies are buffered for rewriting.
+- Camera streams and other endless responses are passed through unbuffered, and
+  they close the connection when they end, since the end of the body is the end
+  of the socket.
+- The asset cache trusts the `?v=` hash. Two kiosks running different builds ask
+  for different URLs and are cached separately, which is the intent.
 - There is no mDNS discovery. The fleet list from the app's settings seeds the
   registry, and the roster seen through the proxy keeps it current; a fleet whose
   settings list is empty starts answering 502 for ids until a page passes through.

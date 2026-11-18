@@ -10,6 +10,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Map;
 
 /** Tests that need no device: JSON, the roster rewrite, frames and a live proxy round trip. */
@@ -26,6 +27,8 @@ public final class FleetProxyPluginTest {
         proxyRewritesJsonAndHeaders();
         gzippedJsonIsDecoded();
         gzippedAssetsPassThrough();
+        keepAliveReusesSockets();
+        staticAssetsServedFromCache();
         postBodyReachesUpstream();
         proxyUnknownKiosk();
         proxyRedirectsRoot();
@@ -236,6 +239,144 @@ public final class FleetProxyPluginTest {
             out.append(text);
         }
         return out.toString();
+    }
+
+    /** A page of ninety files should not be ninety handshakes, on either side. */
+    private static void keepAliveReusesSockets() throws Exception {
+        final ServerSocket upstream = new ServerSocket(0);
+        final AtomicInteger accepted = new AtomicInteger();
+        Thread responder = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    while (true) {
+                        Socket socket = upstream.accept();
+                        accepted.incrementAndGet();
+                        InputStream in = socket.getInputStream();
+                        OutputStream out = socket.getOutputStream();
+                        while (true) {
+                            HttpProxyServer.Request request = HttpProxyServer.readRequest(in);
+                            if (request == null) {
+                                break;
+                            }
+                            String body = "{\"ok\":true}";
+                            out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                    + body.length() + "\r\n\r\n" + body).getBytes("ISO-8859-1"));
+                            out.flush();
+                        }
+                        socket.close();
+                    }
+                } catch (Exception stopped) {
+                    // The test closes the server.
+                }
+            }
+        });
+        responder.setDaemon(true);
+        responder.start();
+
+        Registry registry = new Registry();
+        registry.set("1111111111111111", "127.0.0.1:" + upstream.getLocalPort());
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            Socket client = new Socket("127.0.0.1", server.port());
+            client.setSoTimeout(5000);
+            OutputStream out = client.getOutputStream();
+            for (int i = 0; i < 3; i++) {
+                out.write("GET /1111111111111111/api/ping HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                        .getBytes("ISO-8859-1"));
+                out.flush();
+            }
+            StringBuilder seen = new StringBuilder();
+            byte[] buffer = new byte[4096];
+            long deadline = System.currentTimeMillis() + 5000;
+            while (System.currentTimeMillis() < deadline && count("HTTP/1.1 200", seen.toString()) < 3) {
+                int read = client.getInputStream().read(buffer);
+                if (read < 0) {
+                    break;
+                }
+                seen.append(new String(buffer, 0, read, "ISO-8859-1"));
+            }
+            check(count("HTTP/1.1 200", seen.toString()) == 3,
+                    "three responses on one client connection, saw " + count("HTTP/1.1 200", seen.toString()));
+            check(accepted.get() == 1, "one upstream connection for three requests, saw " + accepted.get());
+            client.close();
+        } finally {
+            server.stop();
+            upstream.close();
+        }
+    }
+
+    /** One copy of a versioned asset serves every kiosk running that build. */
+    private static void staticAssetsServedFromCache() throws Exception {
+        final String asset = "console.log('" + repeat("kiosk-satellite-", 200) + "');";
+        final byte[] body = asset.getBytes("UTF-8");
+        final ServerSocket upstream = new ServerSocket(0);
+        final AtomicInteger accepted = new AtomicInteger();
+        final AtomicInteger requests = new AtomicInteger();
+        Thread responder = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    while (true) {
+                        Socket socket = upstream.accept();
+                        accepted.incrementAndGet();
+                        InputStream in = socket.getInputStream();
+                        OutputStream out = socket.getOutputStream();
+                        while (true) {
+                            HttpProxyServer.Request request = HttpProxyServer.readRequest(in);
+                            if (request == null) {
+                                break;
+                            }
+                            requests.incrementAndGet();
+                            out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n"
+                                    + "Cache-Control: public, max-age=31536000, immutable\r\n"
+                                    + "Content-Length: " + body.length + "\r\n\r\n").getBytes("ISO-8859-1"));
+                            out.write(body);
+                            out.flush();
+                        }
+                        socket.close();
+                    }
+                } catch (Exception stopped) {
+                    // The test closes the server.
+                }
+            }
+        });
+        responder.setDaemon(true);
+        responder.start();
+
+        Registry registry = new Registry();
+        registry.set("aaaaaaaaaaaa1111", "127.0.0.1:" + upstream.getLocalPort());
+        registry.set("bbbbbbbbbbbb2222", "127.0.0.1:" + upstream.getLocalPort());
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "https://dash.example",
+                freePort(), quiet());
+        server.start();
+        try {
+            Response first = get(server.port(), "/aaaaaaaaaaaa1111/static/app.js?v=abc123", null);
+            Response second = get(server.port(), "/bbbbbbbbbbbb2222/static/app.js?v=abc123", null);
+            check(first.status == 200 && second.status == 200, "both answered: " + first.status + "/" + second.status);
+            check(first.body.equals(second.body), "same asset either way");
+            check(requests.get() == 1, "second kiosk served from cache, upstream requests: " + requests.get());
+            check(second.header("content-security-policy") != null
+                    && second.header("content-security-policy").contains("https://dash.example"),
+                    "cached response still carries frame-ancestors");
+            Response other = get(server.port(), "/aaaaaaaaaaaa1111/static/app.js?v=different", null);
+            check(other.status == 200 && requests.get() == 2, "a different build is fetched: " + requests.get());
+            check(accepted.get() >= 1, "the upstream was reached at all");
+        } finally {
+            server.stop();
+            upstream.close();
+        }
+    }
+
+    private static int count(String needle, String haystack) {
+        int seen = 0;
+        int at = haystack.indexOf(needle);
+        while (at >= 0) {
+            seen++;
+            at = haystack.indexOf(needle, at + needle.length());
+        }
+        return seen;
     }
 
     private static void postBodyReachesUpstream() throws Exception {

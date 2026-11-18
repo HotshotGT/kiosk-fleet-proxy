@@ -50,6 +50,9 @@ final class WebSocketRelay {
         if (key == null || key.isEmpty()) {
             return;
         }
+        // The connection now carries frames, not requests: the idle timeout that
+        // guards keep-alive would cut a quiet socket off.
+        clientSocket.setSoTimeout(0);
         Socket upstream = new Socket();
         try {
             upstream.connect(address(target), 10000);
@@ -95,7 +98,7 @@ final class WebSocketRelay {
     private static void refuse(OutputStream out) throws IOException {
         List<String[]> headers = new ArrayList<String[]>();
         headers.add(new String[] {"Content-Length", "0"});
-        HttpProxyServer.writeHead(out, 502, "Bad Gateway", headers);
+        HttpProxyServer.writeHead(out, 502, "Bad Gateway", headers, false);
     }
 
     /** Reads frames until the socket ends, rewriting text messages on the way. */
