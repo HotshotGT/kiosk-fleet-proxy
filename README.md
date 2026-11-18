@@ -131,6 +131,8 @@ release, so leave `prerelease` off.
   others. The admin UI keeps its token in `localStorage` per path, so switching
   kiosks asks for that kiosk's password once.
 - Learned addresses live in memory. A restart re-seeds from the app's fleet list.
+- A failure answers with a page that matches the app's own login card: the kiosk's
+  logo, its palette, and the kiosk id plus address that failed. It is never cached.
 - The `Host` header decides the origin written into rewritten links. Behind a TLS
   reverse proxy, forward the original `Host` and `X-Forwarded-Proto: https` so
   links come back as `https`.

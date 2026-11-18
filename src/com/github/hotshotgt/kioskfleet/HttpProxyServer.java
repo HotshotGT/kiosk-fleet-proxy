@@ -194,7 +194,8 @@ final class HttpProxyServer {
         if ("/".equals(path)) {
             String self = registry.self();
             if (self.isEmpty()) {
-                return text(out, 503, "waiting for this kiosk to report its id", keepAlive);
+                return page(out, 503, "Waiting for this kiosk",
+                        "it has not reported its own id yet", keepAlive);
             }
             List<String[]> headers = new ArrayList<String[]>();
             headers.add(new String[] {"Location", "/" + self + "/" + (query.isEmpty() ? "" : "?" + query)});
@@ -210,7 +211,8 @@ final class HttpProxyServer {
             }
             String ownerTarget = owner == null ? null : registry.get(owner);
             if (ownerTarget == null) {
-                return text(out, 404, "no kiosk serves this build yet", keepAlive);
+                return page(out, 404, "This kiosk's files are not here yet",
+                        path + (query.isEmpty() ? "" : "?" + query), keepAlive);
             }
             String staticKey = ranged(request) ? null
                     : cacheKeyOf(request.method, path, query, takesGzip(request));
@@ -227,14 +229,15 @@ final class HttpProxyServer {
         }
         Matcher matcher = ROUTE.matcher(path);
         if (!matcher.matches()) {
-            return text(out, 404, "not found", keepAlive);
+            return page(out, 404, "Nothing here", request.path(), keepAlive);
         }
         String id = matcher.group(1);
         String rest = (matcher.group(2) == null ? "/" : matcher.group(2)) + (query.isEmpty() ? "" : "?" + query);
         String target = registry.get(id);
         if (target == null) {
             log.log("no address known for " + id);
-            return text(out, 502, "kiosk " + id + " has not introduced itself to this device yet", keepAlive);
+            return page(out, 502, "Kiosk unknown to this device",
+                    "kiosk " + id + " has not introduced itself yet", keepAlive);
         }
         String origin = originOf(request);
         if ("websocket".equalsIgnoreCase(request.headers.first("Upgrade"))) {
@@ -284,8 +287,8 @@ final class HttpProxyServer {
                     continue;
                 }
                 log.log(request.method + " " + request.path() + " -> " + target + ": " + failed.getMessage());
-                return text(out, 502, "kiosk " + id + " at " + target + " did not answer: " + failed.getMessage(),
-                        keepAlive);
+                return page(out, 502, "Kiosk unreachable",
+                        id + " at " + target + ": " + failed.getMessage(), keepAlive);
             }
             if (response == null) {
                 // The same dead socket, closed cleanly instead of reset.
@@ -294,7 +297,7 @@ final class HttpProxyServer {
                 if (attempt == 0 && !hasBody) {
                     continue;
                 }
-                return text(out, 502, "kiosk " + id + " at " + target + " closed the connection without answering",
+                return page(out, 502, "Kiosk did not answer", id + " at " + target + " closed the connection",
                         keepAlive);
             }
         }
@@ -916,6 +919,35 @@ final class HttpProxyServer {
         head.append(keepAlive ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n");
         out.write(head.toString().getBytes("ISO-8859-1"));
         out.flush();
+    }
+
+    /** The same card the app's login uses, so a failure looks like part of the fleet. */
+    private static boolean page(OutputStream out, int status, String headline, String detail, boolean keepAlive)
+            throws IOException {
+        byte[] bytes = ErrorPage.html(headline, detail).getBytes("UTF-8");
+        List<String[]> headers = new ArrayList<String[]>();
+        headers.add(new String[] {"Content-Type", "text/html; charset=utf-8"});
+        headers.add(new String[] {"Cache-Control", "no-store"});
+        headers.add(new String[] {"Content-Length", String.valueOf(bytes.length)});
+        writeHead(out, status, reason(status), headers, keepAlive);
+        out.write(bytes);
+        out.flush();
+        return keepAlive;
+    }
+
+    private static String reason(int status) {
+        switch (status) {
+            case 400:
+                return "Bad Request";
+            case 404:
+                return "Not Found";
+            case 502:
+                return "Bad Gateway";
+            case 503:
+                return "Service Unavailable";
+            default:
+                return String.valueOf(status);
+        }
     }
 
     private static boolean text(OutputStream out, int status, String body, boolean keepAlive) throws IOException {

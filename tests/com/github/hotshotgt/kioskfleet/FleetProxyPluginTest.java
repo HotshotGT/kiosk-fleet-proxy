@@ -641,6 +641,12 @@ public final class FleetProxyPluginTest {
             Response response = get(server.port(), "/dddddddddddd3333/", null);
             check(response.status == 502, "a dead kiosk is a bad gateway, not a dropped socket: " + response.status);
             check(response.body.contains("dddddddddddd3333"), "the answer names the kiosk: " + response.body);
+            check(response.body.contains("Kiosk Satellite"), "it is a page, not a bare line: " + response.body);
+            check(response.body.contains("Kiosk unreachable"), "and it says what is wrong: " + response.body);
+            check("text/html; charset=utf-8".equals(response.header("content-type")),
+                    "served as html: " + response.header("content-type"));
+            check("no-store".equals(response.header("cache-control")), "never cached: "
+                    + response.header("cache-control"));
         } finally {
             server.stop();
         }
