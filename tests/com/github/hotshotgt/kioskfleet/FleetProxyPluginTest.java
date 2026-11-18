@@ -24,6 +24,8 @@ public final class FleetProxyPluginTest {
         base64AndAcceptKey();
         framesRoundTrip();
         proxyRewritesJsonAndHeaders();
+        gzippedJsonIsDecoded();
+        gzippedAssetsPassThrough();
         postBodyReachesUpstream();
         proxyUnknownKiosk();
         proxyRedirectsRoot();
@@ -149,6 +151,93 @@ public final class FleetProxyPluginTest {
         }
     }
 
+    /** The roster arrives gzipped when the browser asks for it; it still gets rewritten. */
+    private static void gzippedJsonIsDecoded() throws Exception {
+        String body = "{\"followers\":[{\"id\":\"1111111111111111\",\"address\":\"192.0.2.163\","
+                + "\"port\":2324,\"url\":\"http://192.0.2.163:2324\"}]}";
+        byte[] compressed = gzip(body);
+        ServerSocket upstream = serveOnce("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + "Content-Encoding: gzip\r\nContent-Length: " + compressed.length + "\r\n\r\n", compressed);
+
+        Registry registry = new Registry();
+        registry.set("1111111111111111", "127.0.0.1:" + upstream.getLocalPort());
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            Response response = get(server.port(), "/1111111111111111/api/fleet", "Accept-Encoding: gzip\r\n");
+            check(response.status == 200, "status: " + response.status);
+            check(response.header("content-encoding") == null, "gzipped json comes back plain");
+            check(!response.body.contains("http://192.0.2.163:2324"), "roster inside gzip is rewritten");
+            check(response.body.contains("http://127.0.0.1:" + server.port() + "/1111111111111111"),
+                    "rewritten link: " + response.body);
+        } finally {
+            server.stop();
+            upstream.close();
+        }
+    }
+
+    /** Assets stay compressed: passing them through saves the bandwidth they were sent with. */
+    private static void gzippedAssetsPassThrough() throws Exception {
+        byte[] compressed = gzip("const catalog = [" + repeat("\"item\",", 400) + "\"end\"];");
+        ServerSocket upstream = serveOnce("HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n"
+                + "Content-Encoding: gzip\r\nContent-Length: " + compressed.length + "\r\n\r\n", compressed);
+
+        Registry registry = new Registry();
+        registry.set("1111111111111111", "127.0.0.1:" + upstream.getLocalPort());
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            Response response = get(server.port(), "/1111111111111111/static/catalogs.js", "Accept-Encoding: gzip\r\n");
+            check(response.status == 200, "status: " + response.status);
+            check("gzip".equals(response.header("content-encoding")), "compression kept: "
+                    + response.header("content-encoding"));
+            check(response.bytes.length == compressed.length, "bytes untouched: forwarded "
+                    + response.bytes.length + " of " + compressed.length);
+        } finally {
+            server.stop();
+            upstream.close();
+        }
+    }
+
+    private static ServerSocket serveOnce(final String head, final byte[] body) throws Exception {
+        final ServerSocket upstream = new ServerSocket(0);
+        Thread responder = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Socket socket = upstream.accept();
+                    HttpProxyServer.readRequest(socket.getInputStream());
+                    OutputStream out = socket.getOutputStream();
+                    out.write(head.getBytes("ISO-8859-1"));
+                    out.write(body);
+                    out.flush();
+                    socket.close();
+                } catch (Exception ignored) {
+                    // Asserted in the test body.
+                }
+            }
+        });
+        responder.setDaemon(true);
+        responder.start();
+        return upstream;
+    }
+
+    private static byte[] gzip(String text) throws Exception {
+        ByteArrayOutputStream raw = new ByteArrayOutputStream();
+        java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(raw);
+        gzip.write(text.getBytes("UTF-8"));
+        gzip.close();
+        return raw.toByteArray();
+    }
+
+    private static String repeat(String text, int times) {
+        StringBuilder out = new StringBuilder(text.length() * times);
+        for (int i = 0; i < times; i++) {
+            out.append(text);
+        }
+        return out.toString();
+    }
+
     private static void postBodyReachesUpstream() throws Exception {
         ServerSocket upstream = new ServerSocket(0);
         Thread responder = new Thread(new Runnable() {
@@ -241,6 +330,8 @@ public final class FleetProxyPluginTest {
         String header(String name) {
             return headers.get(name.toLowerCase());
         }
+
+        byte[] bytes;
     }
 
     private static Response get(int port, String path, String extraHeaders) throws Exception {
@@ -286,6 +377,7 @@ public final class FleetProxyPluginTest {
             received.write(chunk, 0, read);
         }
         response.body = received.toString("UTF-8");
+        response.bytes = received.toByteArray();
         socket.close();
         return response;
     }

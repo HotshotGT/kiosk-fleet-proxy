@@ -208,16 +208,17 @@ final class HttpProxyServer {
                 return;
             }
             String contentType = response.headers.first("Content-Type");
+            String contentEncoding = response.headers.first("Content-Encoding");
+            boolean gzipped = contentEncoding != null && contentEncoding.toLowerCase(Locale.US).contains("gzip");
             boolean json = contentType != null
-                    && contentType.toLowerCase(Locale.US).startsWith("application/json")
-                    && response.headers.first("Content-Encoding") == null;
+                    && contentType.toLowerCase(Locale.US).startsWith("application/json");
 
             List<String[]> headers = new ArrayList<String[]>();
             for (String[] header : response.headers.all()) {
                 String name = header[0].toLowerCase(Locale.US);
                 if (name.equals("x-frame-options") || name.equals("content-security-policy")
                         || name.equals("transfer-encoding") || name.equals("connection")
-                        || name.equals("content-length")) {
+                        || name.equals("content-length") || (json && name.equals("content-encoding"))) {
                     continue;
                 }
                 String value = header[1];
@@ -230,6 +231,9 @@ final class HttpProxyServer {
 
             if (json) {
                 byte[] body = readBody(upIn, response);
+                if (gzipped) {
+                    body = gunzip(body);
+                }
                 byte[] rewritten = FleetPayload.rewrite(new String(body, "UTF-8"), origin, registry, local)
                         .getBytes("UTF-8");
                 headers.add(new String[] {"Content-Length", String.valueOf(rewritten.length)});
@@ -277,7 +281,11 @@ final class HttpProxyServer {
             }
             head.append(header[0]).append(": ").append(header[1]).append("\r\n");
         }
-        head.append("Accept-Encoding: identity\r\nConnection: close\r\n\r\n");
+        String acceptEncoding = request.headers.first("Accept-Encoding");
+        boolean clientTakesGzip = acceptEncoding != null
+                && acceptEncoding.toLowerCase(Locale.US).contains("gzip");
+        head.append("Accept-Encoding: ").append(clientTakesGzip ? "gzip" : "identity")
+                .append("\r\nConnection: close\r\n\r\n");
         return head.toString();
     }
 
@@ -487,6 +495,14 @@ final class HttpProxyServer {
             out.write(buffer, 0, read);
             out.flush();
         }
+    }
+
+    /** A gzipped body, decoded so the roster inside can be rewritten. */
+    private static byte[] gunzip(byte[] compressed) throws IOException {
+        InputStream in = new java.util.zip.GZIPInputStream(new java.io.ByteArrayInputStream(compressed));
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(compressed.length * 4, 1024));
+        copyUntilEnd(in, out);
+        return out.toByteArray();
     }
 
     static void writeHead(OutputStream out, int status, String reason, List<String[]> headers) throws IOException {
