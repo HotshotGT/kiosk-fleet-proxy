@@ -36,6 +36,7 @@ public final class FleetProxyPluginTest {
         htmlGetsOriginStaticPathsAndPrefetch();
         gzippedHtmlMatchesItsHeader();
         staticPathsServeWithoutAKioskId();
+        learnedBuildServesItsOwnAssets();
         compressedJsonPassesThrough();
         postBodyReachesUpstream();
         proxyUnknownKiosk();
@@ -512,6 +513,71 @@ public final class FleetProxyPluginTest {
             server.stop();
             upstream.close();
         }
+    }
+
+
+    /** A page names its build; that build's files must come from that kiosk. */
+    private static void learnedBuildServesItsOwnAssets() throws Exception {
+        final ServerSocket leader = fakeKiosk("aaaaaaaa", "the-leader-app");
+        final ServerSocket other = fakeKiosk("bbbbbbbb", "the-other-app");
+        Registry registry = new Registry();
+        registry.set("aaaaaaaaaaaa1111", "127.0.0.1:" + leader.getLocalPort());
+        registry.set("bbbbbbbbbbbb2222", "127.0.0.1:" + other.getLocalPort());
+        registry.setSelf("aaaaaaaaaaaa1111");
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            server.learnBuildsNow();
+            Response mine = get(server.port(), "/static/main.js?v=aaaaaaaa", null);
+            check(mine.body.contains("the-leader-app"), "leader's own files: " + mine.body);
+            Response theirs = get(server.port(), "/static/main.js?v=bbbbbbbb", null);
+            check(theirs.body.contains("the-other-app"), "another build is not answered with this device's app: "
+                    + theirs.body);
+        } finally {
+            server.stop();
+            leader.close();
+            other.close();
+        }
+    }
+
+    private static ServerSocket fakeKiosk(final String build, final String assetBody) throws Exception {
+        final ServerSocket kiosk = new ServerSocket(0);
+        Thread responder = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    while (true) {
+                        Socket socket = kiosk.accept();
+                        InputStream in = socket.getInputStream();
+                        OutputStream out = socket.getOutputStream();
+                        HttpProxyServer.Request request = HttpProxyServer.readRequest(in);
+                        if (request == null) {
+                            socket.close();
+                            continue;
+                        }
+                        boolean page = "/".equals(request.path());
+                        byte[] body = (page
+                                ? "<html><head></head><body><script src=\"static/main.js?v=" + build
+                                        + "\"></script></body></html>"
+                                : assetBody).getBytes("UTF-8");
+                        out.write(("HTTP/1.1 200 OK" + EOL + "Content-Type: "
+                                + (page ? "text/html; charset=utf-8" : "application/javascript") + EOL
+                                + "Cache-Control: " + (page ? "no-store"
+                                        : "public, max-age=31536000, immutable") + EOL
+                                + "Content-Length: " + body.length + EOL + "Connection: close" + EOL + EOL)
+                                .getBytes("ISO-8859-1"));
+                        out.write(body);
+                        out.flush();
+                        socket.close();
+                    }
+                } catch (Exception stopped) {
+                    // The test closes the kiosk.
+                }
+            }
+        });
+        responder.setDaemon(true);
+        responder.start();
+        return kiosk;
     }
 
     /** After learning the build, /static/ is answered without a kiosk id. */

@@ -44,7 +44,9 @@ This plugin puts one listener in front of the fleet. Every kiosk is reachable at
 - Each page is rewritten on the way out so its files load from `/static/...`
   rather than `/<kiosk>/static/...`. The browser then keeps one copy for the whole
   fleet instead of one per kiosk, which is what makes a second switch instant.
-  Two builds never share, because the build hash stays in the URL.
+  Two builds never share, because the build hash stays in the URL. To answer
+  those paths the proxy has to know which kiosk serves which build, so it reads
+  each kiosk's page once at start, in the background.
 - That same pass adds `<link rel="prefetch">` for up to four other kiosks, and
   gives the page a five second lifetime instead of the app's `no-store`, so the
   prefetched copy is still there when the click comes.

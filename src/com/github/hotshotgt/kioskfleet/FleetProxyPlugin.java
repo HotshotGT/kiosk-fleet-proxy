@@ -17,7 +17,7 @@ import me.jxl.kiosk.plugins.PluginHost;
  */
 public final class FleetProxyPlugin implements KioskPlugin {
 
-    static final String VERSION = "0.4.1";
+    static final String VERSION = "0.4.2";
     static final int PORT = 8790;
 
     private final Registry registry = new Registry();
@@ -78,6 +78,7 @@ public final class FleetProxyPlugin implements KioskPlugin {
         try {
             candidate.start();
             server = candidate;
+            candidate.learnBuildsAsync();
         } catch (IOException busy) {
             server = null;
             report("Kiosk Fleet Proxy could not listen on :" + PORT + ": " + busy.getMessage(), true);

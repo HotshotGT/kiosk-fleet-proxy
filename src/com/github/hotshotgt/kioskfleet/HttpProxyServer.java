@@ -47,6 +47,7 @@ final class HttpProxyServer {
     }
 
     private static final Pattern ROUTE = Pattern.compile("^/([0-9a-fA-F]{6,40})(/.*)?$");
+    private static final String LINE_BREAK = "" + (char) 13 + (char) 10;
     private static final int MAX_LINE = 8192;
     private static final int MAX_HEADERS = 100;
     private static final int BUFFER = 16384;
@@ -463,6 +464,60 @@ final class HttpProxyServer {
         }
         if (disk != null) {
             disk.write(key, status, reason, headers, body);
+        }
+    }
+
+    /**
+     * Reads each kiosk's page once, in the background, to learn its build hash.
+     *
+     * <p>Origin level asset paths are answered by a kiosk that serves the build
+     * asked for. After a restart that map is empty, and a request would fall back
+     * to this device, which may be on another build: a page paired with someone
+     * else's JavaScript. One small request per kiosk closes that hole.
+     */
+    void learnBuildsAsync() {
+        Thread learner = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                learnBuildsNow();
+            }
+        }, "kiosk-fleet-proxy-builds");
+        learner.setDaemon(true);
+        learner.start();
+    }
+
+    void learnBuildsNow() {
+        {
+            {
+                for (final String id : registry.ids()) {
+                    String target = registry.get(id);
+                    if (target == null) {
+                        continue;
+                    }
+                    try {
+                        Socket socket = new Socket();
+                        socket.connect(address(target), 5000);
+                        socket.setSoTimeout(5000);
+                        OutputStream out = socket.getOutputStream();
+                        InputStream in = new BufferedInputStream(socket.getInputStream(), BUFFER);
+                        out.write(("GET / HTTP/1.1" + LINE_BREAK + "Host: " + target + LINE_BREAK
+                                + "Accept-Encoding: gzip" + LINE_BREAK + "Connection: close" + LINE_BREAK
+                                + LINE_BREAK).getBytes("ISO-8859-1"));
+                        out.flush();
+                        Response response = readResponse(in);
+                        if (response != null && response.status == 200) {
+                            byte[] body = readBody(in, response);
+                            String encoding = response.headers.first("Content-Encoding");
+                            String page = new String(encoding != null && encoding.contains("gzip") ? gunzip(body) : body,
+                                    "UTF-8");
+                            HtmlRewriter.rewrite(page, id, registry);
+                        }
+                        closeQuietly(socket);
+                    } catch (Exception unreachable) {
+                        // An offline kiosk keeps its asset paths unusable until it answers.
+                    }
+                }
+            }
         }
     }
 
