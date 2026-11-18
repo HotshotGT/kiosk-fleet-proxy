@@ -288,7 +288,7 @@ final class HttpProxyServer {
                 }
                 log.log(request.method + " " + request.path() + " -> " + target + ": " + failed.getMessage());
                 return page(out, 502, "Kiosk unreachable",
-                        id + " at " + target + ": " + failed.getMessage(), keepAlive);
+                        id + " at " + target + ", " + shortReason(failed.getMessage()), keepAlive);
             }
             if (response == null) {
                 // The same dead socket, closed cleanly instead of reset.
@@ -933,6 +933,25 @@ final class HttpProxyServer {
         out.write(bytes);
         out.flush();
         return keepAlive;
+    }
+
+    /** The half of a socket exception a reader can act on; the rest goes to the log. */
+    private static String shortReason(String message) {
+        String text = message == null ? "" : message;
+        String lower = text.toLowerCase(Locale.US);
+        if (lower.contains("ehostunreach")) {
+            return "no route to host";
+        }
+        if (lower.contains("econnrefused") || lower.contains("refused")) {
+            return "connection refused";
+        }
+        if (lower.contains("enetunreach")) {
+            return "network unreachable";
+        }
+        if (lower.contains("timed out")) {
+            return "no answer within six seconds";
+        }
+        return text.length() > 120 ? text.substring(0, 120) + "..." : text;
     }
 
     private static String reason(int status) {
