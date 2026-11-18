@@ -7,11 +7,11 @@ switcher works inside a dashboard iframe.
 
 ### Community Plugins (Recommended)
 
-Kiosk Fleet Proxy is listed in [Community Plugins](https://kiosksatellite.com/plugins/). Use the button below to open it in your Kiosk Satellite and install it.
+Kiosk Fleet Proxy is pending review for [Community Plugins](https://kiosksatellite.com/plugins/). The button below opens it in your Kiosk Satellite whether or not the review has finished, and it installs the same release either way, checksum and all.
 
 [![Install in Kiosk Satellite](https://kiosksatellite.com/img/badges/plugin-add.svg)](https://kiosksatellite.com/redirect/plugin/?repository=HotshotGT/kiosk-fleet-proxy)
 
-Or search for `Kiosk Fleet Proxy` in **Settings > Plugin Manager > Browse plugins** in Kiosk Satellite.
+It does not appear in the directory's search until that review passes. **Settings > Plugin Manager > Browse plugins** in Kiosk Satellite is where it will show up under `Kiosk Fleet Proxy`.
 
 ### Manual
 
