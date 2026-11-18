@@ -73,8 +73,8 @@ This plugin puts one listener in front of the fleet. Every kiosk is reachable at
 - Request bodies are forwarded, which the admin API needs for every command and
   for login.
 - Connections stay open in both directions. A dashboard is around ninety
-  requests, and without keep-alive that is ninety handshakes to Traefik and
-  ninety more to the kiosk.
+  requests, and without keep-alive that is ninety handshakes to the reverse proxy
+  and ninety more to the kiosk.
 - The app's static files are held under their `?v=<hash>`, up to 4 MB in memory
   and mirrored into the app's cache directory so a restart or an update keeps it.
   Opening a kiosk you have never visited serves its assets from this device

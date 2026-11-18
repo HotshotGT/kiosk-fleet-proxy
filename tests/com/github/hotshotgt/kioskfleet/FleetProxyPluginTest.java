@@ -57,10 +57,10 @@ public final class FleetProxyPluginTest {
     }
 
     private static void jsonRoundTripsEscapes() {
-        String original = "{\"name\":\"Amzn \\\"Echo\\\" Show\",\"path\":\"a\\\\b\",\"nl\":\"x\\ny\"}";
+        String original = "{\"name\":\"A \\\"quoted\\\" name\",\"path\":\"a\\\\b\",\"nl\":\"x\\ny\"}";
         Object parsed = Json.parse(original);
         Object again = Json.parse(Json.stringify(parsed));
-        check(Json.stringify(again).contains("Amzn \\\"Echo\\\" Show"), "quotes escape once");
+        check(Json.stringify(again).contains("A \\\"quoted\\\" name"), "quotes escape once");
         check(Json.parseOrNull("not json") == null, "non JSON is rejected, not thrown");
     }
 
