@@ -24,6 +24,7 @@ public final class FleetProxyPluginTest {
         base64AndAcceptKey();
         framesRoundTrip();
         proxyRewritesJsonAndHeaders();
+        postBodyReachesUpstream();
         proxyUnknownKiosk();
         proxyRedirectsRoot();
         System.out.println("FleetProxyPluginTest ok");
@@ -148,6 +149,55 @@ public final class FleetProxyPluginTest {
         }
     }
 
+    private static void postBodyReachesUpstream() throws Exception {
+        ServerSocket upstream = new ServerSocket(0);
+        Thread responder = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Socket socket = upstream.accept();
+                    HttpProxyServer.Request request = HttpProxyServer.readRequest(socket.getInputStream());
+                    int length = Integer.parseInt(request.header("Content-Length").trim());
+                    byte[] payload = new byte[length];
+                    int offset = 0;
+                    while (offset < length) {
+                        int read = socket.getInputStream().read(payload, offset, length - offset);
+                        if (read < 0) {
+                            break;
+                        }
+                        offset += read;
+                    }
+                    String seen = request.method + " " + new String(payload, "UTF-8");
+                    String body = "{\"seen\":" + Json.stringify(seen) + "}";
+                    OutputStream out = socket.getOutputStream();
+                    out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                            + body.length() + "\r\n\r\n").getBytes("ISO-8859-1"));
+                    out.write(body.getBytes("UTF-8"));
+                    out.flush();
+                    socket.close();
+                } catch (Exception ignored) {
+                    // Asserted below.
+                }
+            }
+        });
+        responder.setDaemon(true);
+        responder.start();
+
+        Registry registry = new Registry();
+        registry.set("1111111111111111", "127.0.0.1:" + upstream.getLocalPort());
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            Response response = post(server.port(), "/1111111111111111/api/login", "{\"password\":\"hunter2\"}");
+            check(response.status == 200, "post status: " + response.status);
+            check(response.body.contains("POST {\\\"password\\\":\\\"hunter2\\\"}"),
+                    "body and method forwarded: " + response.body);
+        } finally {
+            server.stop();
+            upstream.close();
+        }
+    }
+
     private static void proxyUnknownKiosk() throws Exception {
         Registry registry = new Registry();
         HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
@@ -194,13 +244,27 @@ public final class FleetProxyPluginTest {
     }
 
     private static Response get(int port, String path, String extraHeaders) throws Exception {
+        return request(port, "GET", path, null, extraHeaders);
+    }
+
+    private static Response post(int port, String path, String body) throws Exception {
+        return request(port, "POST", path, body, null);
+    }
+
+    private static Response request(int port, String method, String path, String body, String extraHeaders)
+            throws Exception {
         Socket socket = new Socket();
         socket.connect(new InetSocketAddress("127.0.0.1", port), 5000);
         socket.setSoTimeout(5000);
-        String request = "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1:" + port + "\r\n"
+        byte[] payload = body == null ? new byte[0] : body.getBytes("UTF-8");
+        String head = method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1:" + port + "\r\n"
+                + (payload.length > 0 ? "Content-Type: application/json\r\nContent-Length: " + payload.length + "\r\n" : "")
                 + (extraHeaders == null ? "" : extraHeaders) + "Connection: close\r\n\r\n";
         OutputStream out = socket.getOutputStream();
-        out.write(request.getBytes("ISO-8859-1"));
+        out.write(head.getBytes("ISO-8859-1"));
+        if (payload.length > 0) {
+            out.write(payload);
+        }
         out.flush();
         InputStream in = socket.getInputStream();
         Response response = new Response();
@@ -215,13 +279,13 @@ public final class FleetProxyPluginTest {
             response.headers.put(line.substring(0, colon).trim().toLowerCase(),
                     line.substring(colon + 1).trim());
         }
-        ByteArrayOutputStream body = new ByteArrayOutputStream();
-        byte[] buffer = new byte[4096];
+        ByteArrayOutputStream received = new ByteArrayOutputStream();
+        byte[] chunk = new byte[4096];
         int read;
-        while ((read = in.read(buffer)) > 0) {
-            body.write(buffer, 0, read);
+        while ((read = in.read(chunk)) > 0) {
+            received.write(chunk, 0, read);
         }
-        response.body = body.toString("UTF-8");
+        response.body = received.toString("UTF-8");
         socket.close();
         return response;
     }

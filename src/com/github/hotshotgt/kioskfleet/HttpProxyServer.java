@@ -180,7 +180,7 @@ final class HttpProxyServer {
                     .relay(socket, request, in, out, rest + (query.isEmpty() ? "" : "?" + query));
             throw new IOException("websocket finished");
         }
-        proxy(request, id, rest + (request.query().isEmpty() ? "" : "?" + request.query()), target, origin, out);
+        proxy(request, in, id, rest + (request.query().isEmpty() ? "" : "?" + request.query()), target, origin, out);
     }
 
     private static String originOf(Request request) {
@@ -199,8 +199,8 @@ final class HttpProxyServer {
     // -----------------------------------------------------------------------
     // proxying
 
-    private void proxy(Request request, String id, String path, String target, String origin, OutputStream out)
-            throws IOException {
+    private void proxy(Request request, InputStream clientIn, String id, String path, String target, String origin,
+                       OutputStream out) throws IOException {
         Socket upstream = new Socket();
         try {
             upstream.connect(address(target), 10000);
@@ -214,6 +214,26 @@ final class HttpProxyServer {
             InputStream upIn = new BufferedInputStream(upstream.getInputStream(), BUFFER);
             OutputStream upOut = new BufferedOutputStream(upstream.getOutputStream(), BUFFER);
             upOut.write(requestHead(request, path, target).getBytes("ISO-8859-1"));
+            upOut.flush();
+            // The admin API is all POST with a JSON body, so a dropped body turns
+            // every command into a 401 or an empty request.
+            String transferEncoding = request.header("Transfer-Encoding");
+            boolean chunkedRequest = transferEncoding != null
+                    && transferEncoding.toLowerCase(Locale.US).contains("chunked");
+            String lengthHeader = request.header("Content-Length");
+            if (chunkedRequest) {
+                copyChunked(clientIn, upOut);
+            } else if (lengthHeader != null) {
+                long length = -1;
+                try {
+                    length = Long.parseLong(lengthHeader.trim());
+                } catch (NumberFormatException bad) {
+                    length = -1;
+                }
+                if (length > 0) {
+                    copyExactly(clientIn, upOut, length);
+                }
+            }
             upOut.flush();
 
             Response response = readResponse(upIn);
@@ -290,7 +310,7 @@ final class HttpProxyServer {
         head.append("Host: ").append(target).append("\r\n");
         for (Map.Entry<String, List<String>> entry : request.headers.entrySet()) {
             String name = entry.getKey();
-            if (hopByHop(name) || name.equals("host") || name.equals("accept-encoding") || name.equals("content-length")) {
+            if (hopByHop(name) || name.equals("host") || name.equals("accept-encoding")) {
                 continue;
             }
             for (String value : entry.getValue()) {
@@ -305,7 +325,7 @@ final class HttpProxyServer {
 
     private static boolean hopByHop(String lowerName) {
         return lowerName.equals("connection") || lowerName.equals("keep-alive") || lowerName.equals("proxy-connection")
-                || lowerName.equals("te") || lowerName.equals("trailer") || lowerName.equals("transfer-encoding")
+                || lowerName.equals("te") || lowerName.equals("trailer")
                 || lowerName.equals("upgrade") || lowerName.equals("sec-websocket-key")
                 || lowerName.equals("sec-websocket-version") || lowerName.equals("sec-websocket-extensions");
     }
