@@ -37,6 +37,7 @@ public final class FleetProxyPluginTest {
         gzippedHtmlMatchesItsHeader();
         staticPathsServeWithoutAKioskId();
         learnedBuildServesItsOwnAssets();
+        rangeRequestsSkipTheCache();
         compressedJsonPassesThrough();
         postBodyReachesUpstream();
         proxyUnknownKiosk();
@@ -540,6 +541,26 @@ public final class FleetProxyPluginTest {
         }
     }
 
+
+    /** A cached whole file must not be handed to a request that asked for a slice. */
+    private static void rangeRequestsSkipTheCache() throws Exception {
+        final ServerSocket kiosk = fakeKiosk("cccccccc", "0123456789");
+        Registry registry = new Registry();
+        registry.set("aaaaaaaaaaaa1111", "127.0.0.1:" + kiosk.getLocalPort());
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            get(server.port(), "/aaaaaaaaaaaa1111/", null);
+            check(get(server.port(), "/static/main.js?v=cccccccc", null).status == 200, "cached once");
+            Response ranged = get(server.port(), "/static/main.js?v=cccccccc",
+                    "Range: bytes=0-3" + EOL + "Accept-Encoding: identity" + EOL);
+            check(ranged.status == 206, "the range reached the kiosk instead of the cache: " + ranged.status);
+        } finally {
+            server.stop();
+            kiosk.close();
+        }
+    }
+
     private static ServerSocket fakeKiosk(final String build, final String assetBody) throws Exception {
         final ServerSocket kiosk = new ServerSocket(0);
         Thread responder = new Thread(new Runnable() {
@@ -560,6 +581,15 @@ public final class FleetProxyPluginTest {
                                 ? "<html><head></head><body><script src=\"static/main.js?v=" + build
                                         + "\"></script></body></html>"
                                 : assetBody).getBytes("UTF-8");
+                        if (!page && request.headers.first("Range") != null) {
+                            out.write(("HTTP/1.1 206 Partial Content" + EOL + "Content-Type: application/javascript"
+                                    + EOL + "Content-Range: bytes 0-3/10" + EOL + "Content-Length: 4" + EOL
+                                    + "Connection: close" + EOL + EOL).getBytes("ISO-8859-1"));
+                            out.write("0123".getBytes("UTF-8"));
+                            out.flush();
+                            socket.close();
+                            continue;
+                        }
                         out.write(("HTTP/1.1 200 OK" + EOL + "Content-Type: "
                                 + (page ? "text/html; charset=utf-8" : "application/javascript") + EOL
                                 + "Cache-Control: " + (page ? "no-store"

@@ -211,7 +211,8 @@ final class HttpProxyServer {
             if (ownerTarget == null) {
                 return text(out, 404, "no kiosk serves this build yet", keepAlive);
             }
-            String staticKey = cacheKeyOf(request.method, path, query, takesGzip(request));
+            String staticKey = ranged(request) ? null
+                    : cacheKeyOf(request.method, path, query, takesGzip(request));
             if (staticKey != null) {
                 Cached hit = cached(staticKey);
                 if (hit != null) {
@@ -242,7 +243,8 @@ final class HttpProxyServer {
         int split = rest.indexOf('?');
         String restPath = split < 0 ? rest : rest.substring(0, split);
         String restQuery = split < 0 ? "" : rest.substring(split + 1);
-        String cacheKey = cacheKeyOf(request.method, restPath, restQuery, takesGzip(request));
+        String cacheKey = ranged(request) ? null
+                : cacheKeyOf(request.method, restPath, restQuery, takesGzip(request));
         if (cacheKey != null) {
             Cached hit = cached(cacheKey);
             if (hit != null) {
@@ -416,6 +418,14 @@ final class HttpProxyServer {
     // -----------------------------------------------------------------------
     // Static cache. The app versions every asset with ?v=<hash> and serves it
     // immutable, so one copy serves every kiosk running that build.
+
+    /**
+     * A range request must reach the kiosk, because a cached whole file would be
+     * sent back as a 200 to a client that asked for a slice.
+     */
+    private static boolean ranged(Request request) {
+        return request.headers.first("Range") != null;
+    }
 
     private static boolean takesGzip(Request request) {
         String acceptEncoding = request.headers.first("Accept-Encoding");
