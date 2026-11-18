@@ -164,6 +164,11 @@ release, so leave `prerelease` off.
 - Cached bytes are stored as upstream sent them, so gzip and plain variants are
   separate entries. A client that does not accept gzip is never handed gzipped
   bytes out of the cache.
+- Discovery reads two keys from the app's own preferences while running inside it,
+  `flutter.ks.fleet.id` and `flutter.ks.fleet.followers`. It only reads them and
+  never writes. They are the app's current names; if a future version renames them
+  the registry starts empty and fills from the roster that passes through, which is
+  also why a fleet with an empty settings list answers 502 for a while.
 - There is no mDNS discovery. The fleet list from the app's settings seeds the
   registry, and the roster seen through the proxy keeps it current; a fleet whose
   settings list is empty starts answering 502 for ids until a page passes through.
