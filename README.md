@@ -37,10 +37,12 @@ This plugin puts one listener in front of the fleet. Every kiosk is reachable at
 - Connections stay open in both directions. A dashboard is around ninety
   requests, and without keep-alive that is ninety handshakes to Traefik and
   ninety more to the kiosk.
-- The app's static files are held under their `?v=<hash>`, up to 24 MB in memory
+- The app's static files are held under their `?v=<hash>`, up to 4 MB in memory
   and mirrored into the app's cache directory so a restart or an update keeps it.
   Opening a kiosk you have never visited serves its assets from this device
-  instead of pulling a megabyte and a half over the network.
+  instead of pulling a megabyte and a half over the network. One build of the
+  fleet's files measures about 1.3 MB compressed, so the ceiling is headroom, not
+  a working set.
 - Each page is rewritten on the way out so its files load from `/static/...`
   rather than `/<kiosk>/static/...`. The browser then keeps one copy for the whole
   fleet instead of one per kiosk, which is what makes a second switch instant.

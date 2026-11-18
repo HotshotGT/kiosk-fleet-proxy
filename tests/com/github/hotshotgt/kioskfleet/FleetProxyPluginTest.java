@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 package com.github.hotshotgt.kioskfleet;
 
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -38,6 +39,7 @@ public final class FleetProxyPluginTest {
         staticPathsServeWithoutAKioskId();
         learnedBuildServesItsOwnAssets();
         rangeRequestsSkipTheCache();
+        websocketFramesAreRewritten();
         compressedJsonPassesThrough();
         postBodyReachesUpstream();
         proxyUnknownKiosk();
@@ -558,6 +560,69 @@ public final class FleetProxyPluginTest {
         } finally {
             server.stop();
             kiosk.close();
+        }
+    }
+
+
+    /** The roster also arrives over a socket, and those links need rewriting too. */
+    private static void websocketFramesAreRewritten() throws Exception {
+        final ServerSocket upstream = new ServerSocket(0);
+        Thread hub = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Socket socket = upstream.accept();
+                    InputStream in = socket.getInputStream();
+                    OutputStream out = socket.getOutputStream();
+                    HttpProxyServer.Request request = HttpProxyServer.readRequest(in);
+                    String key = request.headers.first("Sec-WebSocket-Key");
+                    out.write(("HTTP/1.1 101 Switching Protocols" + EOL + "Upgrade: websocket" + EOL
+                            + "Connection: Upgrade" + EOL + "Sec-WebSocket-Accept: "
+                            + WebSocketRelay.acceptKey(key) + EOL + EOL).getBytes("ISO-8859-1"));
+                    String roster = "{\"fleet\":[{\"id\":\"aaaaaaaaaaaa1111\",\"address\":\"192.0.2.5\","
+                            + "\"port\":2324,\"url\":\"http://192.0.2.5:2324\",\"self\":true}]}";
+                    WebSocketRelay.writeFrame(out, true, 1, roster.getBytes("UTF-8"), false);
+                    out.flush();
+                    Thread.sleep(2000);
+                    socket.close();
+                } catch (Exception finished) {
+                    // The test closes the socket.
+                }
+            }
+        });
+        hub.setDaemon(true);
+        hub.start();
+
+        Registry registry = new Registry();
+        registry.set("aaaaaaaaaaaa1111", "127.0.0.1:" + upstream.getLocalPort());
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "https://dash.example",
+                freePort(), quiet());
+        server.start();
+        Socket client = null;
+        try {
+            client = new Socket("127.0.0.1", server.port());
+            OutputStream out = client.getOutputStream();
+            InputStream in = new BufferedInputStream(client.getInputStream());
+            out.write(("GET /aaaaaaaaaaaa1111/ws HTTP/1.1" + EOL + "Host: dash.example" + EOL
+                    + "X-Forwarded-Proto: https" + EOL + "Upgrade: websocket" + EOL + "Connection: Upgrade" + EOL
+                    + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" + EOL + "Sec-WebSocket-Version: 13" + EOL + EOL)
+                    .getBytes("ISO-8859-1"));
+            out.flush();
+            HttpProxyServer.Response upgraded = HttpProxyServer.readResponse(in);
+            check(upgraded != null && upgraded.status == 101,
+                    "upgraded: " + (upgraded == null ? "no response" : upgraded.status));
+            WebSocketRelay.Frame frame = WebSocketRelay.readFrame(in);
+            check(frame != null, "a frame arrived");
+            String roster = new String(frame.payload, "UTF-8");
+            check(roster.contains("https://dash.example/aaaaaaaaaaaa1111"),
+                    "the roster link points at the proxy: " + roster);
+            check(roster.contains("192.0.2.5"), "the address is still there for the registry: " + roster);
+        } finally {
+            if (client != null) {
+                client.close();
+            }
+            server.stop();
+            upstream.close();
         }
     }
 

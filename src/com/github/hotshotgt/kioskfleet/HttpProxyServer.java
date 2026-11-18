@@ -55,7 +55,7 @@ final class HttpProxyServer {
     private static final int MAX_IDLE_PER_TARGET = 8;
     private static final int MAX_IDLE_TOTAL = 32;
     private static final long MAX_CACHE_ENTRY = 4L * 1024 * 1024;
-    private static final long MAX_CACHE_BYTES = 24L * 1024 * 1024;
+    private static final long MAX_CACHE_BYTES = 4L * 1024 * 1024;
 
     private final Registry registry;
     private final LocalAddresses local;
@@ -233,7 +233,7 @@ final class HttpProxyServer {
         String target = registry.get(id);
         if (target == null) {
             log.log("no address known for " + id);
-            return text(out, 502, "unknown kiosk", keepAlive);
+            return text(out, 502, "kiosk " + id + " has not introduced itself to this device yet", keepAlive);
         }
         String origin = originOf(request);
         if ("websocket".equalsIgnoreCase(request.headers.first("Upgrade"))) {
@@ -280,7 +280,8 @@ final class HttpProxyServer {
                     continue;
                 }
                 log.log(request.method + " " + request.path() + " -> " + target + ": " + failed.getMessage());
-                return text(out, 502, "kiosk unreachable", keepAlive);
+                return text(out, 502, "kiosk " + id + " at " + target + " did not answer: " + failed.getMessage(),
+                        keepAlive);
             }
             if (response == null) {
                 // The same dead socket, closed cleanly instead of reset.
@@ -289,7 +290,8 @@ final class HttpProxyServer {
                 if (attempt == 0 && !hasBody) {
                     continue;
                 }
-                return text(out, 502, "kiosk sent no response", keepAlive);
+                return text(out, 502, "kiosk " + id + " at " + target + " closed the connection without answering",
+                        keepAlive);
             }
         }
 

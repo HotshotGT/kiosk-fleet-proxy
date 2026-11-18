@@ -3,7 +3,7 @@
   "apiVersion": 1,
   "id": "ks-kiosk-fleet-proxy",
   "name": "Kiosk Fleet Proxy",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "minAndroidSdk": 24,
   "minAppVersion": "2026.10.45",
   "entryClass": "com.github.hotshotgt.kioskfleet.FleetProxyPlugin",
