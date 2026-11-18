@@ -56,6 +56,7 @@ final class HttpProxyServer {
     private static final int MAX_IDLE_TOTAL = 32;
     private static final long MAX_CACHE_ENTRY = 4L * 1024 * 1024;
     private static final long MAX_CACHE_BYTES = 4L * 1024 * 1024;
+    private static final int CONNECT_TIMEOUT_MS = 6000;
 
     private final Registry registry;
     private final LocalAddresses local;
@@ -263,8 +264,10 @@ final class HttpProxyServer {
         Upstream upstream = null;
         Response response = null;
         for (int attempt = 0; response == null; attempt++) {
-            upstream = acquire(target);
+            boolean connected = false;
             try {
+                upstream = acquire(target);
+                connected = true;
                 upstream.out.write(requestHead(request, path, target).getBytes("ISO-8859-1"));
                 if (hasBody) {
                     copyRequestBody(request, clientIn, upstream.out);
@@ -276,7 +279,8 @@ final class HttpProxyServer {
                 upstream = null;
                 // A pooled socket the kiosk already dropped is worth one retry,
                 // but only for a request without a body: that one cannot replay.
-                if (attempt == 0 && !hasBody) {
+                // A kiosk that will not accept a connection is not retried.
+                if (attempt == 0 && !hasBody && connected) {
                     continue;
                 }
                 log.log(request.method + " " + request.path() + " -> " + target + ": " + failed.getMessage());
@@ -596,8 +600,13 @@ final class HttpProxyServer {
             }
         }
         Socket socket = new Socket();
-        socket.connect(address(target), 10000);
-        socket.setTcpNoDelay(true);
+        try {
+            socket.connect(address(target), CONNECT_TIMEOUT_MS);
+            socket.setTcpNoDelay(true);
+        } catch (IOException unreachable) {
+            closeQuietly(socket);
+            throw unreachable;
+        }
         return new Upstream(target, socket);
     }
 

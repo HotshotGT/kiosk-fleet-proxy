@@ -40,6 +40,7 @@ public final class FleetProxyPluginTest {
         learnedBuildServesItsOwnAssets();
         rangeRequestsSkipTheCache();
         websocketFramesAreRewritten();
+        unreachableKioskIsAnswered();
         compressedJsonPassesThrough();
         postBodyReachesUpstream();
         proxyUnknownKiosk();
@@ -623,6 +624,25 @@ public final class FleetProxyPluginTest {
             }
             server.stop();
             upstream.close();
+        }
+    }
+
+
+    /** A kiosk that refuses the connection still gets an answer, naming itself. */
+    private static void unreachableKioskIsAnswered() throws Exception {
+        ServerSocket closed = new ServerSocket(0);
+        int port = closed.getLocalPort();
+        closed.close();
+        Registry registry = new Registry();
+        registry.set("dddddddddddd3333", "127.0.0.1:" + port);
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            Response response = get(server.port(), "/dddddddddddd3333/", null);
+            check(response.status == 502, "a dead kiosk is a bad gateway, not a dropped socket: " + response.status);
+            check(response.body.contains("dddddddddddd3333"), "the answer names the kiosk: " + response.body);
+        } finally {
+            server.stop();
         }
     }
 
