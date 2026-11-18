@@ -215,7 +215,9 @@ final class HttpProxyServer {
         int split = rest.indexOf('?');
         String restPath = split < 0 ? rest : rest.substring(0, split);
         String restQuery = split < 0 ? "" : rest.substring(split + 1);
-        String cacheKey = cacheKeyOf(request.method, restPath, restQuery);
+        String acceptEncoding = request.headers.first("Accept-Encoding");
+        boolean gzipOk = acceptEncoding != null && acceptEncoding.toLowerCase(Locale.US).contains("gzip");
+        String cacheKey = cacheKeyOf(request.method, restPath, restQuery, gzipOk);
         if (cacheKey != null) {
             Cached hit = cached(cacheKey);
             if (hit != null) {
@@ -362,11 +364,14 @@ final class HttpProxyServer {
     // Static cache. The app versions every asset with ?v=<hash> and serves it
     // immutable, so one copy serves every kiosk running that build.
 
-    private static String cacheKeyOf(String method, String path, String query) {
+    private static String cacheKeyOf(String method, String path, String query, boolean gzipOk) {
         if (path == null || !path.startsWith("/static/") || !query.contains("v=") || !"GET".equals(method)) {
             return null;
         }
-        return path + "?" + query;
+        // The stored bytes are whichever encoding upstream chose, so the variant
+        // is part of the key: a client that cannot take gzip must not be handed
+        // a gzipped body.
+        return path + "?" + query + (gzipOk ? "|gzip" : "|plain");
     }
 
     private static boolean storable(Response response) {

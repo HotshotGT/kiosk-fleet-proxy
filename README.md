@@ -127,7 +127,12 @@ release, so leave `prerelease` off.
   they close the connection when they end, since the end of the body is the end
   of the socket.
 - The asset cache trusts the `?v=` hash. Two kiosks running different builds ask
-  for different URLs and are cached separately, which is the intent.
+  for different URLs and are cached separately, which is the intent. On this app
+  the hash is shared by every kiosk on the same build, and the bytes match: the
+  same three files served by two kiosks hash identically.
+- Cached bytes are stored as upstream sent them, so gzip and plain variants are
+  separate entries. A client that does not accept gzip is never handed gzipped
+  bytes out of the cache.
 - There is no mDNS discovery. The fleet list from the app's settings seeds the
   registry, and the roster seen through the proxy keeps it current; a fleet whose
   settings list is empty starts answering 502 for ids until a page passes through.

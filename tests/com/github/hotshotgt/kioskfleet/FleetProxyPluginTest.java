@@ -16,6 +16,9 @@ import java.util.Map;
 /** Tests that need no device: JSON, the roster rewrite, frames and a live proxy round trip. */
 public final class FleetProxyPluginTest {
 
+    /** A CR LF pair, built without escapes so edits cannot mangle it. */
+    private static final String EOL = "" + (char) 13 + (char) 10;
+
     public static void main(String[] args) throws Exception {
         jsonKeepsWholeNumbers();
         jsonRoundTripsEscapes();
@@ -29,6 +32,7 @@ public final class FleetProxyPluginTest {
         gzippedAssetsPassThrough();
         keepAliveReusesSockets();
         staticAssetsServedFromCache();
+        cacheKeepsEncodingVariantsApart();
         postBodyReachesUpstream();
         proxyUnknownKiosk();
         proxyRedirectsRoot();
@@ -363,6 +367,72 @@ public final class FleetProxyPluginTest {
             Response other = get(server.port(), "/aaaaaaaaaaaa1111/static/app.js?v=different", null);
             check(other.status == 200 && requests.get() == 2, "a different build is fetched: " + requests.get());
             check(accepted.get() >= 1, "the upstream was reached at all");
+        } finally {
+            server.stop();
+            upstream.close();
+        }
+    }
+
+
+    /** A client that cannot take gzip must not be handed gzipped bytes from the cache. */
+    private static void cacheKeepsEncodingVariantsApart() throws Exception {
+        final String asset = "console.log('" + repeat("variant-", 60) + "');";
+        final byte[] plain = asset.getBytes("UTF-8");
+        final byte[] zipped = gzip(asset);
+        final ServerSocket upstream = new ServerSocket(0);
+        final AtomicInteger requests = new AtomicInteger();
+        Thread responder = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    while (true) {
+                        Socket socket = upstream.accept();
+                        InputStream in = socket.getInputStream();
+                        OutputStream out = socket.getOutputStream();
+                        while (true) {
+                            HttpProxyServer.Request request = HttpProxyServer.readRequest(in);
+                            if (request == null) {
+                                break;
+                            }
+                            requests.incrementAndGet();
+                            String accept = request.headers.first("Accept-Encoding");
+                            boolean gzipWanted = accept != null && accept.contains("gzip");
+                            byte[] body = gzipWanted ? zipped : plain;
+                            out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\n"
+                                    + (gzipWanted ? "Content-Encoding: gzip\r\n" : "") 
+                                    + "Cache-Control: public, max-age=31536000, immutable\r\n"
+                                    + "Content-Length: " + body.length + "\r\n\r\n").getBytes("ISO-8859-1"));
+                            out.write(body);
+                            out.flush();
+                        }
+                        socket.close();
+                    }
+                } catch (Exception stopped) {
+                    // The test closes the server.
+                }
+            }
+        });
+        responder.setDaemon(true);
+        responder.start();
+
+        Registry registry = new Registry();
+        registry.set("aaaaaaaaaaaa1111", "127.0.0.1:" + upstream.getLocalPort());
+        registry.set("bbbbbbbbbbbb2222", "127.0.0.1:" + upstream.getLocalPort());
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            Response gz = get(server.port(), "/aaaaaaaaaaaa1111/static/app.js?v=zzz1", "Accept-Encoding: gzip" + EOL);
+            check(gz.status == 200 && "gzip".equals(gz.header("content-encoding")), "gzip variant served as gzip");
+            Response otherKiosk = get(server.port(), "/bbbbbbbbbbbb2222/static/app.js?v=zzz1",
+                    "Accept-Encoding: gzip" + EOL);
+            check(otherKiosk.status == 200 && requests.get() == 1,
+                    "same encoding reuses the entry, requests: " + requests.get());
+            Response plainWanted = get(server.port(), "/aaaaaaaaaaaa1111/static/app.js?v=zzz1", null);
+            check(plainWanted.status == 200, "plain variant answered: " + plainWanted.status);
+            check(plainWanted.header("content-encoding") == null,
+                    "plain client is not handed gzip, got: " + plainWanted.header("content-encoding"));
+            check(plainWanted.body.contains("variant-variant"), "plain body decoded: " + plainWanted.body.length());
+            check(requests.get() == 2, "plain variant was fetched, requests: " + requests.get());
         } finally {
             server.stop();
             upstream.close();
