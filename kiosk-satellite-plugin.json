@@ -3,15 +3,37 @@
   "apiVersion": 1,
   "id": "ks-kiosk-fleet-proxy",
   "name": "Kiosk Fleet Proxy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAndroidSdk": 24,
   "minAppVersion": "2026.10.45",
   "entryClass": "com.github.hotshotgt.kioskfleet.FleetProxyPlugin",
-  "description": "Serve every kiosk in a fleet from one origin so the built-in device switcher works inside a Home Assistant dashboard. Pre-alpha: the plugin registers and reports status, the proxy port is not implemented yet.",
+  "description": "Serve every kiosk in a fleet from one origin so the built-in device switcher works inside a dashboard iframe. Routes /<kiosk id>/ to each kiosk, rewrites fleet links in HTTP responses and WebSocket messages, and adds the frame-ancestors policy the admin server does not send.",
   "author": "Hotshot",
   "license": "Apache-2.0",
   "icon": "icon.png",
   "capabilities": [],
-  "settings": [],
-  "commands": []
+  "settings": [
+    {
+      "key": "port",
+      "type": "number",
+      "title": "Listen port",
+      "default": 8790,
+      "group": "Proxy",
+      "description": "Port this kiosk serves the fleet on. Point a reverse proxy at it, or open it directly."
+    },
+    {
+      "key": "frameAncestors",
+      "type": "string",
+      "title": "Origins allowed to frame this page",
+      "default": "",
+      "group": "Proxy",
+      "description": "Space separated origins, for example https://dashboard.example. Left empty, only this origin may frame the page. The origin this kiosk is reached on comes from the request Host header."
+    }
+  ],
+  "commands": [
+    {
+      "id": "restart",
+      "title": "Restart listener"
+    }
+  ]
 }
