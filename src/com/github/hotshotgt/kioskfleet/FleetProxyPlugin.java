@@ -17,7 +17,7 @@ import me.jxl.kiosk.plugins.PluginHost;
  */
 public final class FleetProxyPlugin implements KioskPlugin {
 
-    static final String VERSION = "0.5.3";
+    static final String VERSION = "0.5.4";
     static final int PORT = 8790;
 
     private final Registry registry = new Registry();

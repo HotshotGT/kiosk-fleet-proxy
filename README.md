@@ -3,6 +3,44 @@
 Serve a whole Kiosk Satellite fleet from one origin, so the app's built-in device
 switcher works inside a dashboard iframe.
 
+## Installation
+
+### Community Plugins (Recommended)
+
+Kiosk Fleet Proxy is listed in [Community Plugins](https://kiosksatellite.com/plugins/). Use the button below to open it in your Kiosk Satellite and install it.
+
+[![Install in Kiosk Satellite](https://kiosksatellite.com/img/badges/plugin-add.svg)](https://kiosksatellite.com/redirect/plugin/?repository=HotshotGT/kiosk-fleet-proxy)
+
+Or search for `Kiosk Fleet Proxy` in **Settings > Plugin Manager > Browse plugins** in Kiosk Satellite.
+
+### Manual
+
+1. Open **Settings > Plugin Manager** in Kiosk Satellite and turn on **Enable Plugins**.
+2. Choose **Add plugin**, paste `https://github.com/HotshotGT/kiosk-fleet-proxy` and choose **Preview**.
+3. Review the plugin and choose **Trust and install**.
+
+A fleet leader pushes an installed plugin to its followers on its own, so one
+install per fleet is enough.
+
+### Scripted
+
+`tools/install.py` drives the admin API, the same path the UI takes, with only the
+admin password:
+
+```sh
+export KS_ADMIN_PASSWORD=...
+./tools/install.py --host http://<kiosk>:2324 --url https://github.com/HotshotGT/kiosk-fleet-proxy --install
+```
+
+Without `--install` it stops after the preview, which is the step that shows the
+manifest and the README. Add `--no-enable` to install it switched off. A ZIP works
+too, including from a Forgejo pipeline, because the app's `installPlugin` command
+takes the package itself instead of a repository URL:
+
+```sh
+./tools/install.py --host http://<kiosk>:2324 --zip dist/ks-kiosk-fleet-proxy-<version>.zip
+```
+
 ## Why
 
 The app serves its remote admin on `http://<device>:2324` with
@@ -53,40 +91,17 @@ This plugin puts one listener in front of the fleet. Every kiosk is reachable at
   gives the page a five second lifetime instead of the app's `no-store`, so the
   prefetched copy is still there when the click comes.
 
-## Install
+## Data
 
-### Plugin Manager
+The plugin opens no connection outside your own network. It talks to the other
+kiosks' admin servers on the addresses the app already knows, and to this device's
+own app. There is no telemetry, no update check of its own and no third party.
 
-**Settings > Plugin Manager > Add plugin**, paste
-`https://github.com/HotshotGT/kiosk-fleet-proxy`, **Preview**, then **Trust and
-install**.
+It writes one thing to disk: a copy of the fleet's static files in the app's cache
+directory, so a restart does not fetch them again. Learned addresses stay in memory.
 
-### From a build you already have
-
-`tools/install.py` drives the admin API, the same path the UI takes. It needs only
-the admin password.
-
-```sh
-export KS_ADMIN_PASSWORD=...
-./tools/install.py --host http://<kiosk>:2324 --zip dist/ks-kiosk-fleet-proxy-0.3.0.zip
-```
-
-A ZIP works from anywhere, including a Forgejo pipeline, because the app's
-`installPlugin` command takes the package itself rather than a repository URL.
-
-### From a GitHub release
-
-```sh
-./tools/install.py --host http://<kiosk>:2324 \
-  --url https://github.com/HotshotGT/kiosk-fleet-proxy --install
-```
-
-That runs `previewPluginRepository` and then `installPluginRepository`, the two
-commands behind the UI's **Trust and install**. Without `--install` it stops after
-the preview. Add `--no-enable` to install it switched off.
-
-A fleet leader pushes an installed plugin to its followers on its own, so one
-install per fleet is enough.
+The app's own Plugin Manager checks GitHub for plugin updates, as it does for every
+installed plugin. The plugin does not.
 
 ## Settings
 
@@ -114,7 +129,7 @@ A JDK and an Android SDK with build-tools are enough, and no device is needed.
 
 ```sh
 python3 tools/test.py
-python3 tools/build.py --android-platform 36.1 --version 0.3.0
+python3 tools/build.py --android-platform 36.1 --version <version>
 ```
 
 `tools/test.py` covers the roster rewrite, the route pattern, RFC 6455 vectors, the
