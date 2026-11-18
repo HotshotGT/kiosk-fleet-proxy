@@ -12,8 +12,8 @@ The admin API takes the same two commands the UI does, so this needs nothing mor
 than the admin password: no adb, no root, no /system write.
 
     export KS_ADMIN_PASSWORD=...
-    ./tools/install.py --host http://192.0.2.165:2324 --zip dist/kiosk-fleet-proxy.zip
-    ./tools/install.py --host http://192.0.2.165:2324 --url https://github.com/HotshotGT/kiosk-fleet-proxy --install
+    ./tools/install.py --host http://<kiosk>:2324 --zip dist/kiosk-fleet-proxy.zip
+    ./tools/install.py --host http://<kiosk>:2324 --url https://github.com/HotshotGT/kiosk-fleet-proxy --install
 
 Without --install, the URL mode stops after the preview and prints what it reviewed.
 """
@@ -113,7 +113,7 @@ def install_repository(host, token, url, install, enable):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--host', required=True, help='admin base URL, e.g. http://192.0.2.165:2324')
+    parser.add_argument('--host', required=True, help='admin base URL, e.g. http://<kiosk>:2324')
     parser.add_argument('--password', default=os.environ.get('KS_ADMIN_PASSWORD', ''),
                         help='admin password, or set KS_ADMIN_PASSWORD')
     source = parser.add_mutually_exclusive_group(required=True)
