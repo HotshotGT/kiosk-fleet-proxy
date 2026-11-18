@@ -3,7 +3,7 @@
   "apiVersion": 1,
   "id": "ks-kiosk-fleet-proxy",
   "name": "Kiosk Fleet Proxy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAndroidSdk": 24,
   "minAppVersion": "2026.10.45",
   "entryClass": "com.github.hotshotgt.kioskfleet.FleetProxyPlugin",
@@ -18,6 +18,9 @@
       "type": "number",
       "title": "Listen port",
       "default": 8790,
+      "min": 1024,
+      "max": 65535,
+      "step": 1,
       "group": "Proxy",
       "description": "Port this kiosk serves the fleet on. Point a reverse proxy at it, or open it directly."
     },
