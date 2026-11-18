@@ -67,6 +67,7 @@ final class HttpProxyServer {
     private long cachedBytes;
     private int idleCount;
 
+    private DiskCache disk;
     private ServerSocket server;
     private ExecutorService workers;
     private volatile boolean running;
@@ -88,6 +89,8 @@ final class HttpProxyServer {
         server.setReuseAddress(true);
         server.bind(new InetSocketAddress(port), 64);
         workers = Executors.newCachedThreadPool();
+        disk = DiskCache.open();
+        restore();
         running = true;
         Thread accept = new Thread(new Runnable() {
             @Override
@@ -152,6 +155,7 @@ final class HttpProxyServer {
     private void serve(Socket socket) {
         try {
             socket.setSoTimeout(IDLE_TIMEOUT_MS);
+            socket.setTcpNoDelay(true);
             InputStream in = new BufferedInputStream(socket.getInputStream(), BUFFER);
             OutputStream out = new BufferedOutputStream(socket.getOutputStream(), BUFFER);
             while (running) {
@@ -196,6 +200,28 @@ final class HttpProxyServer {
             writeHead(out, 302, "Found", headers, keepAlive);
             return keepAlive;
         }
+        if (path.startsWith("/static/")) {
+            String build = query.startsWith("v=") ? query.substring(2) : "";
+            String owner = registry.kioskForBuild(build);
+            if (owner == null) {
+                owner = registry.self().isEmpty() ? registry.anyKiosk() : registry.self();
+            }
+            String ownerTarget = owner == null ? null : registry.get(owner);
+            if (ownerTarget == null) {
+                return text(out, 404, "no kiosk serves this build yet", keepAlive);
+            }
+            String staticKey = cacheKeyOf(request.method, path, query, takesGzip(request));
+            if (staticKey != null) {
+                Cached hit = cached(staticKey);
+                if (hit != null) {
+                    writeHead(out, hit.status, hit.reason, hit.headers, keepAlive);
+                    out.write(hit.body);
+                    out.flush();
+                    return keepAlive;
+                }
+            }
+            return proxy(request, in, owner, path, ownerTarget, originOf(request), out, keepAlive, staticKey);
+        }
         Matcher matcher = ROUTE.matcher(path);
         if (!matcher.matches()) {
             return text(out, 404, "not found", keepAlive);
@@ -215,9 +241,7 @@ final class HttpProxyServer {
         int split = rest.indexOf('?');
         String restPath = split < 0 ? rest : rest.substring(0, split);
         String restQuery = split < 0 ? "" : rest.substring(split + 1);
-        String acceptEncoding = request.headers.first("Accept-Encoding");
-        boolean gzipOk = acceptEncoding != null && acceptEncoding.toLowerCase(Locale.US).contains("gzip");
-        String cacheKey = cacheKeyOf(request.method, restPath, restQuery, gzipOk);
+        String cacheKey = cacheKeyOf(request.method, restPath, restQuery, takesGzip(request));
         if (cacheKey != null) {
             Cached hit = cached(cacheKey);
             if (hit != null) {
@@ -270,6 +294,7 @@ final class HttpProxyServer {
         String contentEncoding = response.headers.first("Content-Encoding");
         boolean gzipped = contentEncoding != null && contentEncoding.toLowerCase(Locale.US).contains("gzip");
         boolean json = contentType != null && contentType.toLowerCase(Locale.US).startsWith("application/json");
+        boolean html = contentType != null && contentType.toLowerCase(Locale.US).startsWith("text/html");
         boolean head = "HEAD".equals(request.method);
 
         List<String[]> headers = new ArrayList<String[]>();
@@ -278,6 +303,7 @@ final class HttpProxyServer {
             if (name.equals("x-frame-options") || name.equals("content-security-policy")
                     || name.equals("transfer-encoding") || name.equals("connection")
                     || name.equals("content-length") || name.equals("keep-alive")
+                    || (html && name.equals("cache-control"))
                     || (json && name.equals("content-encoding"))) {
                 continue;
             }
@@ -300,16 +326,37 @@ final class HttpProxyServer {
                 release(upstream, reusable);
                 return keepAlive && reusable;
             }
-            if (json) {
+            if (html) {
                 byte[] body = readBody(upstream.in, response);
-                if (gzipped) {
-                    body = gunzip(body);
-                }
-                byte[] rewritten = FleetPayload.rewrite(new String(body, "UTF-8"), origin, registry, local)
-                        .getBytes("UTF-8");
+                String page = new String(gzipped ? gunzip(body) : body, "UTF-8");
+                byte[] rewritten = HtmlRewriter.rewrite(page, id, registry).getBytes("UTF-8");
+                // The app sends no-store. A few seconds lets the prefetched copies
+                // of the other kiosks survive until the click, and the page still
+                // names its assets by build hash.
+                headers.add(new String[] {"Cache-Control", "private, max-age=5"});
                 headers.add(new String[] {"Content-Length", String.valueOf(rewritten.length)});
                 writeHead(out, response.status, response.reason, headers, keepAlive);
                 out.write(rewritten);
+                release(upstream, true);
+                return keepAlive;
+            }
+            if (json) {
+                byte[] body = readBody(upstream.in, response);
+                String text = new String(gzipped ? gunzip(body) : body, "UTF-8");
+                String rewritten = FleetPayload.rewrite(text, origin, registry, local);
+                if (gzipped && rewritten.equals(text)) {
+                    // Nothing to change, so send upstream's bytes still compressed.
+                    headers.add(new String[] {"Content-Encoding", contentEncoding});
+                    headers.add(new String[] {"Content-Length", String.valueOf(body.length)});
+                    writeHead(out, response.status, response.reason, headers, keepAlive);
+                    out.write(body);
+                    release(upstream, true);
+                    return keepAlive;
+                }
+                byte[] bytes = rewritten.getBytes("UTF-8");
+                headers.add(new String[] {"Content-Length", String.valueOf(bytes.length)});
+                writeHead(out, response.status, response.reason, headers, keepAlive);
+                out.write(bytes);
                 release(upstream, true);
                 return keepAlive;
             }
@@ -364,6 +411,11 @@ final class HttpProxyServer {
     // Static cache. The app versions every asset with ?v=<hash> and serves it
     // immutable, so one copy serves every kiosk running that build.
 
+    private static boolean takesGzip(Request request) {
+        String acceptEncoding = request.headers.first("Accept-Encoding");
+        return acceptEncoding != null && acceptEncoding.toLowerCase(Locale.US).contains("gzip");
+    }
+
     private static String cacheKeyOf(String method, String path, String query, boolean gzipOk) {
         if (path == null || !path.startsWith("/static/") || !query.contains("v=") || !"GET".equals(method)) {
             return null;
@@ -399,11 +451,33 @@ final class HttpProxyServer {
                 String eldest = cache.keySet().iterator().next();
                 Cached dropped = cache.remove(eldest);
                 cachedBytes -= dropped.body.length;
+                if (disk != null) {
+                    disk.remove(eldest);
+                }
+            }
+        }
+        if (disk != null) {
+            disk.write(key, status, reason, headers, body);
+        }
+    }
+
+    /** Entries kept on disk by a previous run, newest first until the cap. */
+    private void restore() {
+        if (disk == null) {
+            return;
+        }
+        for (Map.Entry<String, Cached> entry : disk.load()) {
+            synchronized (cache) {
+                if (cachedBytes + entry.getValue().body.length > MAX_CACHE_BYTES) {
+                    return;
+                }
+                cache.put(entry.getKey(), entry.getValue());
+                cachedBytes += entry.getValue().body.length;
             }
         }
     }
 
-    private static final class Cached {
+    static final class Cached {
         final int status;
         final String reason;
         final List<String[]> headers;

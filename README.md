@@ -37,10 +37,17 @@ This plugin puts one listener in front of the fleet. Every kiosk is reachable at
 - Connections stay open in both directions. A dashboard is around ninety
   requests, and without keep-alive that is ninety handshakes to Traefik and
   ninety more to the kiosk.
-- The app's static files are held in memory under their `?v=<hash>`, up to 24 MB,
-  because that hash is a content hash. Opening a kiosk you have never visited
-  serves its assets from this device instead of pulling a megabyte and a half over
-  the network. The cache empties when the listener restarts.
+- The app's static files are held under their `?v=<hash>`, up to 24 MB in memory
+  and mirrored into the app's cache directory so a restart or an update keeps it.
+  Opening a kiosk you have never visited serves its assets from this device
+  instead of pulling a megabyte and a half over the network.
+- Each page is rewritten on the way out so its files load from `/static/...`
+  rather than `/<kiosk>/static/...`. The browser then keeps one copy for the whole
+  fleet instead of one per kiosk, which is what makes a second switch instant.
+  Two builds never share, because the build hash stays in the URL.
+- That same pass adds `<link rel="prefetch">` for up to four other kiosks, and
+  gives the page a five second lifetime instead of the app's `no-store`, so the
+  prefetched copy is still there when the click comes.
 
 ## Install
 
@@ -123,6 +130,9 @@ release, so leave `prerelease` off.
 - The `Host` header decides the origin written into rewritten links. Behind a TLS
   reverse proxy, forward the original `Host` and `X-Forwarded-Proto: https` so
   links come back as `https`.
+- A page is cached for five seconds, against the app's `no-store`. That is what
+  makes a prefetch worth anything, and the small staleness it allows cannot point
+  at missing files, since the page names them by build hash.
 - Camera streams and other endless responses are passed through unbuffered, and
   they close the connection when they end, since the end of the body is the end
   of the socket.

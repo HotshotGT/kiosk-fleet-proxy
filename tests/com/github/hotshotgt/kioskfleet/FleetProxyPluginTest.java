@@ -33,6 +33,9 @@ public final class FleetProxyPluginTest {
         keepAliveReusesSockets();
         staticAssetsServedFromCache();
         cacheKeepsEncodingVariantsApart();
+        htmlGetsOriginStaticPathsAndPrefetch();
+        staticPathsServeWithoutAKioskId();
+        compressedJsonPassesThrough();
         postBodyReachesUpstream();
         proxyUnknownKiosk();
         proxyRedirectsRoot();
@@ -433,6 +436,127 @@ public final class FleetProxyPluginTest {
                     "plain client is not handed gzip, got: " + plainWanted.header("content-encoding"));
             check(plainWanted.body.contains("variant-variant"), "plain body decoded: " + plainWanted.body.length());
             check(requests.get() == 2, "plain variant was fetched, requests: " + requests.get());
+        } finally {
+            server.stop();
+            upstream.close();
+        }
+    }
+
+
+    /** The page's files move to one origin level path so every kiosk shares them. */
+    private static void htmlGetsOriginStaticPathsAndPrefetch() throws Exception {
+        String html = "<html><head><title>KS</title></head><body>"
+                + "<script type=\"module\" src=\"static/main.js?v=abc123\"></script>"
+                + "<link rel=\"stylesheet\" href=\"./static/app.css?v=abc123\">"
+                + "</body></html>";
+        byte[] body = html.getBytes("UTF-8");
+        ServerSocket upstream = serveOnce("HTTP/1.1 200 OK" + EOL + "Content-Type: text/html; charset=utf-8" + EOL
+                + "Cache-Control: no-store" + EOL + "Content-Length: " + body.length + EOL + EOL, body);
+
+        Registry registry = new Registry();
+        registry.set("aaaaaaaaaaaa1111", "127.0.0.1:" + upstream.getLocalPort());
+        registry.set("bbbbbbbbbbbb2222", "127.0.0.1:9");
+        registry.setSelf("aaaaaaaaaaaa1111");
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "https://dash.example",
+                freePort(), quiet());
+        server.start();
+        try {
+            Response response = get(server.port(), "/aaaaaaaaaaaa1111/", null);
+            check(response.status == 200, "page served: " + response.status);
+            check(response.body.contains("src=\"/static/main.js?v=abc123\""),
+                    "script url became origin level: " + response.body);
+            check(response.body.contains("href=\"/static/app.css?v=abc123\""), "stylesheet too");
+            check(response.body.contains("<link rel=\"prefetch\" href=\"/bbbbbbbbbbbb2222/\">"),
+                    "other kiosk prefetched: " + response.body);
+            check("private, max-age=5".equals(response.header("cache-control")),
+                    "a few seconds of cache instead of no-store: " + response.header("cache-control"));
+            check(response.header("content-security-policy") != null, "frame ancestors still added");
+        } finally {
+            server.stop();
+            upstream.close();
+        }
+    }
+
+    /** After learning the build, /static/ is answered without a kiosk id. */
+    private static void staticPathsServeWithoutAKioskId() throws Exception {
+        String html = "<html><head></head><body><script src=\"static/main.js?v=abc123\"></script></body></html>";
+        final String asset = "console.log('" + repeat("shared-", 50) + "');";
+        final ServerSocket upstream = new ServerSocket(0);
+        final AtomicInteger requests = new AtomicInteger();
+        Thread responder = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    while (true) {
+                        Socket socket = upstream.accept();
+                        InputStream in = socket.getInputStream();
+                        OutputStream out = socket.getOutputStream();
+                        while (true) {
+                            HttpProxyServer.Request request = HttpProxyServer.readRequest(in);
+                            if (request == null) {
+                                break;
+                            }
+                            requests.incrementAndGet();
+                            boolean page = "/".equals(request.path());
+                            byte[] body = page ? html.getBytes("UTF-8") : asset.getBytes("UTF-8");
+                            out.write(("HTTP/1.1 200 OK" + EOL
+                                    + "Content-Type: " + (page ? "text/html; charset=utf-8" : "application/javascript") + EOL
+                                    + (page ? "Cache-Control: no-store" + EOL
+                                            : "Cache-Control: public, max-age=31536000, immutable" + EOL)
+                                    + "Content-Length: " + body.length + EOL + EOL).getBytes("ISO-8859-1"));
+                            out.write(body);
+                            out.flush();
+                        }
+                        socket.close();
+                    }
+                } catch (Exception stopped) {
+                    // The test closes the server.
+                }
+            }
+        });
+        responder.setDaemon(true);
+        responder.start();
+
+        Registry registry = new Registry();
+        registry.set("aaaaaaaaaaaa1111", "127.0.0.1:" + upstream.getLocalPort());
+        registry.setSelf("aaaaaaaaaaaa1111");
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            check(get(server.port(), "/aaaaaaaaaaaa1111/", null).status == 200, "page first, to learn the build");
+            Response assetResponse = get(server.port(), "/static/main.js?v=abc123", null);
+            check(assetResponse.status == 200, "origin level asset served: " + assetResponse.status);
+            check(assetResponse.body.contains("shared-shared"), "asset body: " + assetResponse.body.length());
+            int afterFirst = requests.get();
+            Response again = get(server.port(), "/static/main.js?v=abc123", null);
+            check(again.status == 200 && requests.get() == afterFirst,
+                    "second origin level request came from cache, requests: " + requests.get());
+            Response unknownBuild = get(server.port(), "/static/main.js?v=ffffeeee1111", null);
+            check(unknownBuild.status == 200, "an unknown build falls back to this kiosk: " + unknownBuild.status);
+        } finally {
+            server.stop();
+            upstream.close();
+        }
+    }
+
+    /** A JSON body with no roster link is sent on still compressed. */
+    private static void compressedJsonPassesThrough() throws Exception {
+        String body = "{\"cpu\":12,\"temperature\":37,\"name\":\"a kiosk with a long enough name\"}";
+        byte[] compressed = gzip(body);
+        ServerSocket upstream = serveOnce("HTTP/1.1 200 OK" + EOL + "Content-Type: application/json" + EOL
+                + "Content-Encoding: gzip" + EOL + "Content-Length: " + compressed.length + EOL + EOL, compressed);
+
+        Registry registry = new Registry();
+        registry.set("aaaaaaaaaaaa1111", "127.0.0.1:" + upstream.getLocalPort());
+        HttpProxyServer server = new HttpProxyServer(registry, new LocalAddresses(), "", freePort(), quiet());
+        server.start();
+        try {
+            Response response = get(server.port(), "/aaaaaaaaaaaa1111/api/status", "Accept-Encoding: gzip" + EOL);
+            check(response.status == 200, "status: " + response.status);
+            check("gzip".equals(response.header("content-encoding")), "kept compressed: "
+                    + response.header("content-encoding"));
+            check(response.bytes.length == compressed.length, "bytes untouched: " + response.bytes.length
+                    + " of " + compressed.length);
         } finally {
             server.stop();
             upstream.close();
