@@ -185,5 +185,7 @@ tools/                        build, test and install
 
 ## License
 
+Copyright 2026 Hotshot. Apache-2.0, see LICENSE.
+
 Apache-2.0. The SDK in `sdk/` comes from the Kiosk Satellite plugins repository
 under the same license, with its plugin exception.

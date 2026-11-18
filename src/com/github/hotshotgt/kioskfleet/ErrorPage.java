@@ -4,10 +4,10 @@ package com.github.hotshotgt.kioskfleet;
 /**
  * The page a dead or unknown kiosk answers with.
  *
- * <p>Colours, type and the logo are the ones the app's own login card uses, taken
- * from the build that was live when this was written ({@code app.css?v=790526ee564f}),
- * so a failure looks like part of Kiosk Satellite rather than a bare gateway line.
- * The theme follows the app's own {@code ks_theme} preference.
+ * <p>Colours, type and the logo are the ones the app's own login card uses, read
+ * from the app's stylesheet, so a failure looks like part of Kiosk Satellite rather
+ * than a bare gateway line. The theme follows the app's own {@code ks_theme}
+ * preference.
  *
  * <p>Google Sans is embedded as a font in the app's stylesheet and is not carried
  * here, so the type falls back to the system face.
